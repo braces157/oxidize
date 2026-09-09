@@ -1,0 +1,15 @@
+[package]
+name = "oxidize-index"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+oxidize-core.workspace = true
+thiserror.workspace = true
+byteorder.workspace = true
+sha1.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

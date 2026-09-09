@@ -1,0 +1,15 @@
+[package]
+name = "oxidize-transport"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+oxidize-core.workspace = true
+oxidize-pack.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

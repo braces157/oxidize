@@ -1,0 +1,16 @@
+[package]
+name = "oxidize-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+sha1.workspace = true
+flate2.workspace = true
+byteorder.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

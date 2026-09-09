@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/index",
+    "crates/refs",
+    "crates/diff",
+    "crates/pack",
+    "crates/transport",
+    "crates/config",
+    "crates/cli",
+    "crates/tui",
+    "tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Oxidize Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/oxidize/ox"
+
+[workspace.dependencies]
+# Internal workspace crates
+oxidize-core = { path = "crates/core" }
+oxidize-index = { path = "crates/index" }
+oxidize-refs = { path = "crates/refs" }
+oxidize-diff = { path = "crates/diff" }
+oxidize-pack = { path = "crates/pack" }
+oxidize-transport = { path = "crates/transport" }
+oxidize-config = { path = "crates/config" }
+oxidize-tui = { path = "crates/tui" }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# CLI & Output
+clap = { version = "4.5", features = ["derive", "cargo"] }
+
+# Hashing & Compression
+sha1 = "0.10"
+flate2 = "1.0"
+
+# Binary serialization & Byte manipulation
+byteorder = "1.5"
+
+# Date and Time
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# High-performance primitives
+memmap2 = "0.9"
+rayon = "1.10"
+
+# Networking
+ureq = { version = "2.10", default-features = false, features = ["tls"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Testing utilities
+tempfile = "3.16"
