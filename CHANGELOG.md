@@ -24,3 +24,9 @@ All notable changes to the **Oxidize** project will be documented in this file.
 - Implemented `write-tree` converting flat index entries into nested `Tree` objects.
 - Added CLI commands: `ox add`, `ox status`, `ox ls-files` (`-s`), `ox update-index`, and `ox write-tree`.
 - Differential integration test suite (`tests/index_compatibility_test.rs`) passing against official `git`.
+
+### Phase 4: Core Porcelain Loop (Completed)
+- Implemented Myers diff algorithm and unified diff formatter with hunk generation in `oxidize-diff`.
+- Implemented reference storage (`RefStore`), atomic updates, reflog tracking, and revision resolver (`rev-parse`) in `oxidize-refs`.
+- Implemented core porcelain commands: `ox commit` (with automated signature & tree generation), `ox log` (`--oneline`, `--graph`), `ox diff` (working tree and `--staged`), `ox rev-parse`, and `ox commit-tree`.
+- Differential integration test suite (`tests/porcelain_compatibility_test.rs`) verifying two-way commit history and diff interoperability with official `git`.

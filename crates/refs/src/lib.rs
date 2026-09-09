@@ -25,3 +25,9 @@ pub enum RefError {
     #[error("core error: {0}")]
     Core(#[from] oxidize_core::CoreError),
 }
+
+pub mod ref_store;
+pub mod signature;
+
+pub use ref_store::RefStore;
+pub use signature::get_default_signature;

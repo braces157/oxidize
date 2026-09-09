@@ -53,4 +53,17 @@ This document records the architectural, design, and protocol decisions made dur
 - **Context**: The index stores paths as a flat sorted list of slash-delimited paths (`a/b/c.txt`), whereas Git stores them as nested `Tree` objects.
 - **Decision**: Build a recursive `TreeNode` Trie structure that aggregates files into intermediate directory nodes, writes subtrees bottom-up to the object store, and returns the root `ObjectId`.
 
+## Phase 4: Core Porcelain Loop
+
+### DECISION 008: Myers Diff Algorithm and Unified Diff Hunking
+- **Date**: 2026-09-10
+- **Context**: `git diff` produces canonical unified diff format with hunks (`@@ -old_start,old_count +new_start,new_count @@`) and 3 lines of context.
+- **Decision**: Implemented the classic Myers O((N+M)D) shortest edit script algorithm with trace backtracking in `oxidize-diff`. Edits are grouped into unified hunks adhering to Git's 3-line context boundary rules.
+
+### DECISION 009: Atomic Reference Updates with Reflog
+- **Date**: 2026-09-10
+- **Context**: Commits must update branch tips and HEAD atomically, recording an entry in `.git/logs/HEAD` and `.git/logs/refs/heads/<branch>` with old OID, new OID, signature, and message.
+- **Decision**: Implemented `RefStore::update_ref` with lockfiles (`<ref>.lock`), validation of expected previous commit, and simultaneous appending to both branch and HEAD reflogs.
+
+
 

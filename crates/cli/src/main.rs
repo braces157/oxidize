@@ -3,9 +3,14 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use oxidize_core::{
-    find_git_dir, Blob, FileMode, LooseObjectStore, Object, ObjectId, ObjectType, Tree, TreeEntry,
+    find_git_dir, Blob, Commit, FileMode, LooseObjectStore, Object, ObjectId, ObjectType, Tree,
+    TreeEntry,
 };
-use oxidize_index::{compute_status, write_tree, Index, IndexEntry, StagedChange, UnstagedChange};
+use oxidize_diff::format_unified_diff;
+use oxidize_index::{
+    compute_status, flatten_tree, write_tree, Index, IndexEntry, StagedChange, UnstagedChange,
+};
+use oxidize_refs::{get_default_signature, RefStore};
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -504,6 +509,20 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
         Commands::LsFiles { stage } => cmd_ls_files(stage)?,
         Commands::UpdateIndex { add, files } => cmd_update_index(add, files)?,
         Commands::WriteTree => cmd_write_tree()?,
+        Commands::Commit { message } => cmd_commit(message)?,
+        Commands::Log {
+            max_count,
+            oneline,
+            graph,
+            tui,
+        } => cmd_log(max_count, oneline, graph, tui)?,
+        Commands::Diff { staged } => cmd_diff(staged)?,
+        Commands::RevParse { verify, args } => cmd_rev_parse(verify, args)?,
+        Commands::CommitTree {
+            tree,
+            parents,
+            message,
+        } => cmd_commit_tree(tree, parents, message)?,
         other => {
             println!("Command {:?} dispatched (stubbed in current phase)", other);
         }
@@ -961,5 +980,288 @@ fn cmd_update_index(add: bool, files: Vec<String>) -> Result<()> {
     }
 
     index.write_to(&index_path)?;
+    Ok(())
+}
+
+fn cmd_commit(message: Option<String>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let ref_store = RefStore::new(&git_dir);
+    let index_path = git_dir.join("index");
+    let index = Index::load_from(&index_path)?;
+
+    if index.entries().is_empty() {
+        bail!("nothing to commit (create/copy files and use \"ox add\" to track)");
+    }
+
+    let tree_oid = write_tree(&index, &store)?;
+    let (branch_name, head_commit_oid) = ref_store.resolve_head()?;
+
+    if let Some(ref head_oid) = head_commit_oid {
+        if let Ok(Object::Commit(head_commit)) = store.read_object(head_oid) {
+            if head_commit.tree == tree_oid {
+                println!("On branch {}", branch_name);
+                println!("nothing to commit, working tree clean");
+                return Ok(());
+            }
+        }
+    }
+
+    let msg_str = message.unwrap_or_else(|| "unspecified commit message".to_string());
+    if msg_str.trim().is_empty() {
+        bail!("Aborting commit due to empty commit message.");
+    }
+
+    let sig = get_default_signature(Some(&git_dir));
+    let parents = if let Some(p) = head_commit_oid {
+        vec![p]
+    } else {
+        Vec::new()
+    };
+
+    let commit = Commit {
+        tree: tree_oid,
+        parents: parents.clone(),
+        author: sig.clone(),
+        committer: sig,
+        gpg_sig: None,
+        message: format!("{}\n", msg_str.trim()),
+    };
+
+    let commit_oid = store.write_object(&Object::Commit(commit))?;
+    let first_line = msg_str.lines().next().unwrap_or("").trim();
+    let ref_msg = format!("commit: {}", first_line);
+    ref_store.update_ref(
+        &branch_name,
+        &commit_oid,
+        head_commit_oid.as_ref(),
+        &ref_msg,
+    )?;
+
+    let short_sha = &commit_oid.to_string()[..7];
+    if parents.is_empty() {
+        println!(
+            "[{} (root-commit) {}] {}",
+            branch_name, short_sha, first_line
+        );
+    } else {
+        println!("[{} {}] {}", branch_name, short_sha, first_line);
+    }
+
+    Ok(())
+}
+
+fn cmd_log(max_count: Option<usize>, oneline: bool, graph: bool, _tui: bool) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let ref_store = RefStore::new(&git_dir);
+
+    let (branch_name, head_oid_opt) = ref_store.resolve_head()?;
+    let start_oid = match head_oid_opt {
+        Some(oid) => oid,
+        None => {
+            println!(
+                "fatal: your current branch '{}' does not have any commits yet",
+                branch_name
+            );
+            return Ok(());
+        }
+    };
+
+    let mut curr_oid = Some(start_oid);
+    let mut count = 0;
+    let limit = max_count.unwrap_or(usize::MAX);
+
+    while let Some(oid) = curr_oid {
+        if count >= limit {
+            break;
+        }
+
+        let obj = store.read_object(&oid)?;
+        let commit = match obj {
+            Object::Commit(c) => c,
+            _ => bail!("object {} is not a commit", oid),
+        };
+
+        if oneline {
+            let short_sha = &oid.to_string()[..7];
+            let first_line = commit.message.lines().next().unwrap_or("");
+            if graph {
+                println!("* {} {}", short_sha, first_line);
+            } else {
+                println!("{} {}", short_sha, first_line);
+            }
+        } else {
+            let ts = chrono::DateTime::from_timestamp(commit.author.time_seconds, 0)
+                .map(|dt| dt.to_rfc2822())
+                .unwrap_or_else(|| commit.author.time_seconds.to_string());
+
+            println!("commit {}", oid);
+            println!("Author: {} <{}>", commit.author.name, commit.author.email);
+            println!("Date:   {}", ts);
+            println!();
+            for line in commit.message.lines() {
+                println!("    {}", line);
+            }
+            println!();
+        }
+
+        count += 1;
+        curr_oid = commit.parents.first().copied();
+    }
+
+    Ok(())
+}
+
+fn cmd_diff(staged: bool) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let repo_root = git_dir.parent().context("git_dir has no parent")?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let ref_store = RefStore::new(&git_dir);
+    let index_path = git_dir.join("index");
+    let index = Index::load_from(&index_path)?;
+
+    if staged {
+        let (_branch, head_oid_opt) = ref_store.resolve_head()?;
+        let head_tree_oid = match head_oid_opt {
+            Some(oid) => {
+                if let Object::Commit(commit) = store.read_object(&oid)? {
+                    Some(commit.tree)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+
+        let head_map = if let Some(ref tree_oid) = head_tree_oid {
+            flatten_tree(&store, tree_oid, "")?
+        } else {
+            std::collections::BTreeMap::new()
+        };
+
+        for entry in index.entries() {
+            let index_blob = match store.read_object(&entry.oid)? {
+                Object::Blob(b) => String::from_utf8_lossy(&b.data).to_string(),
+                _ => String::new(),
+            };
+
+            match head_map.get(&entry.path) {
+                None => {
+                    // New file staged
+                    if let Some(diff) =
+                        format_unified_diff(&entry.path, &entry.path, "", &index_blob, 3)
+                    {
+                        print!("{}", diff);
+                    }
+                }
+                Some((_mode, head_oid)) => {
+                    if &entry.oid != head_oid {
+                        let head_blob = match store.read_object(head_oid)? {
+                            Object::Blob(b) => String::from_utf8_lossy(&b.data).to_string(),
+                            _ => String::new(),
+                        };
+                        if let Some(diff) = format_unified_diff(
+                            &entry.path,
+                            &entry.path,
+                            &head_blob,
+                            &index_blob,
+                            3,
+                        ) {
+                            print!("{}", diff);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Deleted files
+        for (path, (_mode, head_oid)) in &head_map {
+            if index.find_entry(path).is_none() {
+                let head_blob = match store.read_object(head_oid)? {
+                    Object::Blob(b) => String::from_utf8_lossy(&b.data).to_string(),
+                    _ => String::new(),
+                };
+                if let Some(diff) = format_unified_diff(path, path, &head_blob, "", 3) {
+                    print!("{}", diff);
+                }
+            }
+        }
+    } else {
+        // Working directory vs index
+        for entry in index.entries() {
+            let full_path = repo_root.join(&entry.path);
+            let index_blob = match store.read_object(&entry.oid)? {
+                Object::Blob(b) => String::from_utf8_lossy(&b.data).to_string(),
+                _ => String::new(),
+            };
+
+            if full_path.exists() {
+                if let Ok(data) = std::fs::read(&full_path) {
+                    let work_content = String::from_utf8_lossy(&data).to_string();
+                    if work_content != index_blob {
+                        if let Some(diff) = format_unified_diff(
+                            &entry.path,
+                            &entry.path,
+                            &index_blob,
+                            &work_content,
+                            3,
+                        ) {
+                            print!("{}", diff);
+                        }
+                    }
+                }
+            } else {
+                // File deleted in working directory
+                if let Some(diff) =
+                    format_unified_diff(&entry.path, &entry.path, &index_blob, "", 3)
+                {
+                    print!("{}", diff);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_rev_parse(verify: bool, args: Vec<String>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let ref_store = RefStore::new(&git_dir);
+
+    if verify && args.len() != 1 {
+        bail!("--verify requires exactly one parameter");
+    }
+
+    for arg in args {
+        let oid = ref_store.resolve_rev(&arg, &store)?;
+        println!("{}", oid);
+    }
+    Ok(())
+}
+
+fn cmd_commit_tree(tree: String, parents: Vec<String>, message: String) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let tree_oid: ObjectId = tree.parse()?;
+
+    let mut parent_oids = Vec::new();
+    for p in parents {
+        parent_oids.push(p.parse::<ObjectId>()?);
+    }
+
+    let sig = get_default_signature(Some(&git_dir));
+    let commit = Commit {
+        tree: tree_oid,
+        parents: parent_oids,
+        author: sig.clone(),
+        committer: sig,
+        gpg_sig: None,
+        message: format!("{}\n", message.trim()),
+    };
+
+    let commit_oid = store.write_object(&Object::Commit(commit))?;
+    println!("{}", commit_oid);
     Ok(())
 }
