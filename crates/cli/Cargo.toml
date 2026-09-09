@@ -23,6 +23,7 @@ clap.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
+sha1.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

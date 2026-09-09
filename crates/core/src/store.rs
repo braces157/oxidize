@@ -81,6 +81,31 @@ impl LooseObjectStore {
         parse_loose_object(&decompressed)
     }
 
+    /// Reads raw object payload and its object type directly from loose storage.
+    pub fn read_raw(&self, id: &ObjectId) -> Result<(ObjectType, Vec<u8>), CoreError> {
+        let path = self.object_path(id);
+        if !path.exists() {
+            return Err(CoreError::ObjectNotFound(id.to_string()));
+        }
+
+        let file = File::open(path)?;
+        let mut decoder = ZlibDecoder::new(file);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed)?;
+
+        let nul_pos = decompressed
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or(CoreError::CorruptedHeader)?;
+        let header = std::str::from_utf8(&decompressed[..nul_pos])
+            .map_err(|_| CoreError::CorruptedHeader)?;
+        let mut parts = header.split(' ');
+        let type_str = parts.next().ok_or(CoreError::CorruptedHeader)?;
+        let obj_type: ObjectType = type_str.parse()?;
+        let data = decompressed[nul_pos + 1..].to_vec();
+        Ok((obj_type, data))
+    }
+
     /// Resolves an object ID by full hex or prefix (at least 4 characters).
     pub fn find_by_prefix(&self, prefix: &str) -> Result<ObjectId, CoreError> {
         let prefix = prefix.trim();
@@ -176,6 +201,11 @@ pub fn parse_loose_object(bytes: &[u8]) -> Result<Object, CoreError> {
         });
     }
 
+    parse_object_from_content(obj_type, data)
+}
+
+/// Parses raw object payload (without `<type> <size>\0` header) given its `ObjectType`.
+pub fn parse_object_from_content(obj_type: ObjectType, data: &[u8]) -> Result<Object, CoreError> {
     match obj_type {
         ObjectType::Blob => Ok(Object::Blob(Blob::new(data.to_vec()))),
         ObjectType::Tree => parse_tree_content(data),

@@ -33,3 +33,15 @@ pub enum PackError {
     #[error("core error: {0}")]
     Core(#[from] oxidize_core::CoreError),
 }
+
+pub mod delta;
+pub mod index;
+pub mod packfile;
+pub mod store;
+
+pub use delta::{apply_delta, create_delta};
+pub use index::{IndexedObject, PackIndex};
+pub use packfile::{
+    index_packfile, read_pack_object_at, unpack_packfile, write_pack, RawPackObject,
+};
+pub use store::{PackHandle, PackStore, RepoObjectStore};

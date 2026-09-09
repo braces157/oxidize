@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use oxidize_core::store::parse_object_from_content;
 use oxidize_core::{
     find_git_dir, Blob, Commit, FileMode, LooseObjectStore, Object, ObjectId, ObjectType, Tree,
     TreeEntry,
@@ -10,8 +11,13 @@ use oxidize_diff::{format_unified_diff, three_way_merge};
 use oxidize_index::{
     compute_status, flatten_tree, write_tree, Index, IndexEntry, StagedChange, UnstagedChange,
 };
+use oxidize_pack::{
+    index_packfile, read_pack_object_at, unpack_packfile, write_pack, PackIndex, RawPackObject,
+    RepoObjectStore,
+};
 use oxidize_refs::{get_default_signature, RefStore};
-use std::io::{self, BufRead, Read, Write};
+use sha1::{Digest, Sha1};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
@@ -541,6 +547,12 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
             mixed,
             commit,
         } => cmd_reset(hard, soft, mixed, commit)?,
+        Commands::PackObjects { base_name } => cmd_pack_objects(base_name)?,
+        Commands::UnpackObjects => cmd_unpack_objects()?,
+        Commands::IndexPack { file } => cmd_index_pack(file)?,
+        Commands::VerifyPack { verbose, files } => cmd_verify_pack(verbose, files)?,
+        Commands::Gc => cmd_gc()?,
+        Commands::Fsck => cmd_fsck()?,
         other => {
             println!("Command {:?} dispatched (stubbed in current phase)", other);
         }
@@ -598,7 +610,7 @@ fn cmd_hash_object(
 
 fn cmd_cat_file(pretty: bool, show_type: bool, show_size: bool, object_ref: String) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
-    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let store = RepoObjectStore::open(&git_dir)?;
     let oid = store.find_by_prefix(&object_ref)?;
     let obj = store.read_object(&oid)?;
 
@@ -1071,7 +1083,7 @@ fn cmd_commit(message: Option<String>) -> Result<()> {
 
 fn cmd_log(max_count: Option<usize>, oneline: bool, graph: bool, _tui: bool) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
-    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let store = RepoObjectStore::open(&git_dir)?;
     let ref_store = RefStore::new(&git_dir);
 
     let (branch_name, head_oid_opt) = ref_store.resolve_head()?;
@@ -1646,6 +1658,340 @@ fn cmd_reset(hard: bool, soft: bool, _mixed: bool, commit_arg: Option<String>) -
         None,
         &format!("reset: moving to {}", target_str),
     )?;
+
+    Ok(())
+}
+
+fn cmd_pack_objects(base_name: String) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = RepoObjectStore::open(&git_dir)?;
+
+    let mut oids = Vec::new();
+    if !io::stdin().is_terminal() {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let line = line?;
+            let trimmed = line.trim();
+            if trimmed.len() >= 40 {
+                if let Ok(oid) = trimmed[..40].parse::<ObjectId>() {
+                    oids.push(oid);
+                }
+            }
+        }
+    }
+
+    let raw_objects = if oids.is_empty() {
+        store.collect_all_objects()?
+    } else {
+        let mut objs = Vec::new();
+        for oid in oids {
+            let (obj_type, data) = store.read_raw(&oid)?;
+            objs.push(RawPackObject::new(oid, obj_type, data));
+        }
+        objs
+    };
+
+    let (pack_bytes, indexed_objs, pack_checksum) = write_pack(&raw_objects, true)?;
+
+    let pack_path = format!("{}-{}.pack", base_name, pack_checksum);
+    let idx_path = format!("{}-{}.idx", base_name, pack_checksum);
+
+    if let Some(parent) = Path::new(&pack_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    std::fs::write(&pack_path, &pack_bytes)?;
+    PackIndex::write_to(indexed_objs, &pack_checksum, &idx_path)?;
+
+    println!("{}", pack_checksum);
+    Ok(())
+}
+
+fn cmd_unpack_objects() -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+
+    let mut pack_bytes = Vec::new();
+    io::stdin().read_to_end(&mut pack_bytes)?;
+
+    if pack_bytes.is_empty() {
+        bail!("empty input for unpack-objects");
+    }
+
+    let unpacked = unpack_packfile(&pack_bytes)?;
+    for (_oid, obj_type, data) in unpacked {
+        let obj = parse_object_from_content(obj_type, &data)?;
+        store.write_object(&obj)?;
+    }
+
+    Ok(())
+}
+
+fn cmd_index_pack(file: String) -> Result<()> {
+    let pack_bytes =
+        std::fs::read(&file).with_context(|| format!("failed to read packfile '{}'", file))?;
+
+    let (indexed_objects, pack_checksum) = index_packfile(&pack_bytes)?;
+
+    let idx_path = if file.ends_with(".pack") {
+        format!("{}.idx", &file[..file.len() - 5])
+    } else {
+        format!("{}.idx", file)
+    };
+
+    PackIndex::write_to(indexed_objects, &pack_checksum, &idx_path)?;
+    println!("{}", pack_checksum);
+    Ok(())
+}
+
+fn cmd_verify_pack(verbose: bool, files: Vec<String>) -> Result<()> {
+    for file in files {
+        let (idx_path, pack_path) = if file.ends_with(".idx") {
+            let p = format!("{}.pack", &file[..file.len() - 4]);
+            (file.clone(), p)
+        } else if file.ends_with(".pack") {
+            let idx = format!("{}.idx", &file[..file.len() - 5]);
+            (idx, file.clone())
+        } else {
+            (format!("{}.idx", file), format!("{}.pack", file))
+        };
+
+        let index = PackIndex::read_from(&idx_path)
+            .with_context(|| format!("failed to read index file '{}'", idx_path))?;
+        let pack_bytes = std::fs::read(&pack_path)
+            .with_context(|| format!("failed to read packfile '{}'", pack_path))?;
+
+        if pack_bytes.len() < 32 {
+            bail!("packfile '{}' is too short", pack_path);
+        }
+
+        // 1. Verify pack checksum
+        let payload_len = pack_bytes.len() - 20;
+        let mut hasher = Sha1::new();
+        hasher.update(&pack_bytes[..payload_len]);
+        let calculated_hash: [u8; 20] = hasher.finalize().into();
+        let pack_checksum = ObjectId::from_bytes(calculated_hash);
+
+        if pack_checksum != index.pack_checksum {
+            bail!("pack checksum mismatch in index '{}'", idx_path);
+        }
+        if calculated_hash != pack_bytes[payload_len..] {
+            bail!("pack checksum corruption in packfile '{}'", pack_path);
+        }
+
+        // 2. Verify each object's CRC32 and unpack
+        for item in &index.objects {
+            let (obj_type, data, packed_len, crc32) =
+                read_pack_object_at(&pack_bytes, item.offset, None)?;
+
+            if crc32 != item.crc32 {
+                bail!(
+                    "CRC32 mismatch for object {}: index has {:08x}, pack has {:08x}",
+                    item.oid,
+                    item.crc32,
+                    crc32
+                );
+            }
+
+            // Verify SHA-1
+            let mut h = Sha1::new();
+            h.update(format!("{} {}\0", obj_type.as_str(), data.len()).as_bytes());
+            h.update(&data);
+            let calculated_oid = ObjectId::from_bytes(h.finalize().into());
+            if calculated_oid != item.oid {
+                bail!(
+                    "SHA-1 mismatch for object at offset {}: expected {}, computed {}",
+                    item.offset,
+                    item.oid,
+                    calculated_oid
+                );
+            }
+
+            if verbose {
+                println!(
+                    "{} {:<6} {:>7} {:>7} {}",
+                    item.oid,
+                    obj_type.as_str(),
+                    data.len(),
+                    packed_len,
+                    item.offset
+                );
+            }
+        }
+
+        println!("{}: OK", idx_path);
+    }
+    Ok(())
+}
+
+fn cmd_gc() -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let loose = LooseObjectStore::new(git_dir.join("objects"));
+
+    // Collect all loose objects
+    let mut loose_objects = Vec::new();
+    let mut files_to_prune = Vec::new();
+
+    if loose.root().is_dir() {
+        for entry in std::fs::read_dir(loose.root())? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                if dir_name.len() == 2 && dir_name != "in" && dir_name != "pa" {
+                    for sub in std::fs::read_dir(&path)? {
+                        let sub = sub?;
+                        let file_path = sub.path();
+                        let file_name = sub.file_name().to_string_lossy().to_string();
+                        let full_hex = format!("{}{}", dir_name, file_name);
+                        if let Ok(oid) = full_hex.parse::<ObjectId>() {
+                            if let Ok((obj_type, data)) = loose.read_raw(&oid) {
+                                loose_objects.push(RawPackObject::new(oid, obj_type, data));
+                                files_to_prune.push(file_path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if loose_objects.is_empty() {
+        return Ok(());
+    }
+
+    let pack_dir = git_dir.join("objects").join("pack");
+    std::fs::create_dir_all(&pack_dir)?;
+
+    let (pack_bytes, indexed_objs, pack_checksum) = write_pack(&loose_objects, true)?;
+
+    let pack_path = pack_dir.join(format!("pack-{}.pack", pack_checksum));
+    let idx_path = pack_dir.join(format!("pack-{}.idx", pack_checksum));
+
+    std::fs::write(&pack_path, &pack_bytes)?;
+    PackIndex::write_to(indexed_objs, &pack_checksum, &idx_path)?;
+
+    // Prune packed loose objects
+    for file in files_to_prune {
+        let _ = std::fs::remove_file(&file);
+    }
+
+    // Clean up empty directories
+    if loose.root().is_dir() {
+        for entry in (std::fs::read_dir(loose.root())?).flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.len() == 2 {
+                    let _ = std::fs::remove_dir(&path);
+                }
+            }
+        }
+    }
+
+    println!(
+        "Packed {} objects into pack-{}.",
+        loose_objects.len(),
+        pack_checksum
+    );
+    Ok(())
+}
+
+fn cmd_fsck() -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = RepoObjectStore::open(&git_dir)?;
+    let ref_store = RefStore::new(&git_dir);
+
+    let all_objects = store.collect_all_objects()?;
+    let mut reachable: std::collections::HashSet<ObjectId> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<ObjectId> = std::collections::VecDeque::new();
+
+    // 1. Gather roots from refs
+    if let Ok((_head_ref, Some(head_oid))) = ref_store.resolve_head() {
+        queue.push_back(head_oid);
+        reachable.insert(head_oid);
+    }
+    if let Ok(branches) = ref_store.list_branches() {
+        for (_branch, oid) in branches {
+            if reachable.insert(oid) {
+                queue.push_back(oid);
+            }
+        }
+    }
+    // Tags
+    let tags_dir = git_dir.join("refs").join("tags");
+    if tags_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(tags_dir) {
+            for entry in entries.flatten() {
+                if let Ok(oid_str) = std::fs::read_to_string(entry.path()) {
+                    if let Ok(oid) = oid_str.trim().parse::<ObjectId>() {
+                        if reachable.insert(oid) {
+                            queue.push_back(oid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Index
+    let index_file = git_dir.join("index");
+    if index_file.exists() {
+        if let Ok(index) = Index::load_from(&index_file) {
+            for entry in &index.entries {
+                if reachable.insert(entry.oid) {
+                    queue.push_back(entry.oid);
+                }
+            }
+        }
+    }
+
+    // 2. BFS graph traversal to mark reachable objects
+    while let Some(oid) = queue.pop_front() {
+        if let Ok(obj) = store.read_object(&oid) {
+            match obj {
+                Object::Commit(commit) => {
+                    if reachable.insert(commit.tree) {
+                        queue.push_back(commit.tree);
+                    }
+                    for parent in commit.parents {
+                        if reachable.insert(parent) {
+                            queue.push_back(parent);
+                        }
+                    }
+                }
+                Object::Tree(tree) => {
+                    for entry in tree.entries {
+                        if reachable.insert(entry.id) {
+                            queue.push_back(entry.id);
+                        }
+                    }
+                }
+                Object::Tag(tag) => {
+                    if reachable.insert(tag.target) {
+                        queue.push_back(tag.target);
+                    }
+                }
+                Object::Blob(_) => {}
+            }
+        } else {
+            eprintln!("missing object {}", oid);
+        }
+    }
+
+    // 3. Find dangling objects
+    let mut dangling = Vec::new();
+    for obj in &all_objects {
+        if !reachable.contains(&obj.oid) {
+            dangling.push((obj.obj_type, obj.oid));
+        }
+    }
+    dangling.sort_by_key(|d| d.1);
+
+    for (t, oid) in dangling {
+        println!("dangling {} {}", t.as_str(), oid);
+    }
 
     Ok(())
 }

@@ -38,3 +38,12 @@ All notable changes to the **Oxidize** project will be documented in this file.
 - Implemented 3-way line merge with conflict markers synthesis and automated merge commits.
 - Implemented commands: `ox branch`, `ox checkout`, `ox switch`, `ox merge`, and `ox reset` (`--soft`, `--mixed`, `--hard`).
 - Differential integration test suite (`tests/branch_merge_compatibility_test.rs`) passing against official `git`.
+
+### Phase 6: Packfiles & Maintenance (Completed)
+- Implemented packfile v2 writer (`write_pack`), object reader (`read_pack_object_at`), and unpacker (`unpack_packfile`).
+- Implemented delta compression and decompression (`apply_delta`, `create_delta` with copy/insert opcodes).
+- Implemented Git bijective base-128 variable-length offset delta encoding (`OBJ_OFS_DELTA`) and `OBJ_REF_DELTA` handling.
+- Implemented pack index v2 reader and writer (`PackIndex`, `\xFFtOc`, 256 fanout table, CRC32, 4-byte/8-byte offsets).
+- Implemented zero-copy memory-mapped object store (`PackStore`, `RepoObjectStore`) with automatic packfile fallback.
+- Added plumbing & porcelain commands: `ox pack-objects`, `ox unpack-objects`, `ox index-pack`, `ox verify-pack`, `ox gc`, `ox fsck`.
+- Differential integration test suite (`tests/pack_compatibility_test.rs`) passing against official `git` (verifying pack integrity with `git verify-pack`, `git fsck --full`, and bidirectional commit log inspection).

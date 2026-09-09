@@ -77,6 +77,23 @@ This document records the architectural, design, and protocol decisions made dur
 - **Context**: When both branches touch the same file since their common ancestor, Git performs a 3-way merge. Non-overlapping edits must merge cleanly without conflict, while overlapping conflicting edits must output standard conflict markers (`<<<<<<< HEAD`, `=======`, `>>>>>>>`).
 - **Decision**: Implemented `three_way_merge` in `oxidize-diff` aligning diff chunks relative to base lines. When conflicts occur, files are written with conflict markers and staged at stage 1 in the index, pausing the merge for user resolution.
 
+## Phase 6: Packfiles & Maintenance
 
+### DECISION 012: Git Packfile v2 & Offset Delta (OFS_DELTA) Encoding
+- **Date**: 2026-09-10
+- **Context**: Packfile v2 is the canonical storage format for Git repositories, bundling hundreds or thousands of objects into `.pack` archives with delta compression.
+- **Decision**: Implemented `write_pack`, `read_pack_object_at`, and `unpack_packfile` in `oxidize-pack`:
+  - Pack header: `PACK`, version 2, big-endian object count.
+  - Object header: variable-length integer encoding 3-bit type (commit, tree, blob, tag, ofs_delta, ref_delta) and uncompressed size.
+  - OFS_DELTA: Bijective base-128 negative relative offset encoding where each continuation byte adds 1 to the accumulator before shifting.
+  - Delta engine: `apply_delta` and `create_delta` supporting copy (opcode 0x80 | flags) and insert (1..=127) instructions.
+  - Trailing 20-byte SHA-1 covering all preceding bytes of the packfile.
 
-
+### DECISION 013: Pack Index v2 (.idx) and Memory-Mapped Storage Architecture
+- **Date**: 2026-09-10
+- **Context**: Accessing objects within a packfile requires rapid O(log N) lookup without scanning the `.pack` sequentially. Repositories can have multiple packs.
+- **Decision**: Implemented `PackIndex` v2 reader/writer and `PackStore`:
+  - Header: `\xFFtOc`, version 2, 256-entry fanout table.
+  - Tables: Lexicographically sorted OIDs, 4-byte IEEE 802.3 CRC32 checksums covering the entire packed slice (header + delta header + compressed bytes), 4-byte offsets and dynamic 8-byte large offset tables.
+  - Trailing checksums: 20-byte pack checksum followed by 20-byte SHA-1 of the index itself.
+  - `RepoObjectStore`: Transparent zero-copy memory-mapped access using `memmap2`, searching loose objects first and falling back to packfile indexes.
