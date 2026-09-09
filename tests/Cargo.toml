@@ -13,6 +13,10 @@ path = "version_test.rs"
 name = "object_compatibility_test"
 path = "object_compatibility_test.rs"
 
+[[test]]
+name = "index_compatibility_test"
+path = "index_compatibility_test.rs"
+
 [dev-dependencies]
 oxidize-core.workspace = true
 oxidize-index.workspace = true

@@ -41,3 +41,16 @@ This document records the architectural, design, and protocol decisions made dur
 - **Context**: Commands like `git cat-file` and `git ls-tree` allow abbreviated object prefixes down to 4 characters.
 - **Decision**: Implement `find_by_prefix` in `LooseObjectStore`. If a prefix is shorter than 4 characters, return an error. If multiple matching objects are found in the 2-character hex directory, return `CoreError::AmbiguousPrefix`. If exactly one matches, resolve the full `ObjectId`.
 
+## Phase 3: Index & Staging Area
+
+### DECISION 006: Index v2 Binary Padding and Lockfile Semantics
+- **Date**: 2026-09-10
+- **Context**: The Git binary index format requires 1-8 NUL bytes after the path name to pad the total entry size (62 bytes header + path length + padding) to a multiple of 8 bytes. Additionally, index writes must never leave the repository in a corrupted state during interruptions.
+- **Decision**: Implemented strict 1-8 byte NUL padding formula `8 - ((62 + path_len) % 8)` followed by trailing SHA-1 checksum verification. Writing uses `.git/index.lock` with atomic rename.
+
+### DECISION 007: Hierarchical write-tree from Flat Index
+- **Date**: 2026-09-10
+- **Context**: The index stores paths as a flat sorted list of slash-delimited paths (`a/b/c.txt`), whereas Git stores them as nested `Tree` objects.
+- **Decision**: Build a recursive `TreeNode` Trie structure that aggregates files into intermediate directory nodes, writes subtrees bottom-up to the object store, and returns the root `ObjectId`.
+
+

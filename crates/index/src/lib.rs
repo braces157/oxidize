@@ -29,3 +29,13 @@ pub enum IndexError {
     #[error("core error: {0}")]
     Core(#[from] oxidize_core::CoreError),
 }
+
+pub mod entry;
+pub mod index;
+pub mod status;
+pub mod tree;
+
+pub use entry::IndexEntry;
+pub use index::Index;
+pub use status::{compute_status, flatten_tree, RepoStatus, StagedChange, UnstagedChange};
+pub use tree::write_tree;

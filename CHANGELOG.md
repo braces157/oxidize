@@ -16,3 +16,11 @@ All notable changes to the **Oxidize** project will be documented in this file.
 - Implemented directory upward search (`find_git_dir`) and prefix lookup with ambiguity detection in `LooseObjectStore`.
 - Implemented and verified plumbing commands: `ox hash-object` (file & stdin, `-w`), `ox cat-file` (`-p`, `-t`, `-s`), `ox ls-tree` (recursive & long), `ox mktree`, `ox init`.
 - Differential integration test suite (`tests/object_compatibility_test.rs`) passing byte-for-byte against official `git`.
+
+### Phase 3: Index & Staging Area (Completed)
+- Implemented binary Git index format v2 reader and atomic writer (`.git/index.lock` with SHA-1 checksum).
+- Implemented `IndexEntry` metadata extraction from filesystem stat cache and padding rules.
+- Implemented status calculation engine (`compute_status`) diffing HEAD tree vs index vs working tree.
+- Implemented `write-tree` converting flat index entries into nested `Tree` objects.
+- Added CLI commands: `ox add`, `ox status`, `ox ls-files` (`-s`), `ox update-index`, and `ox write-tree`.
+- Differential integration test suite (`tests/index_compatibility_test.rs`) passing against official `git`.

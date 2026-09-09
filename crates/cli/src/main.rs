@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use oxidize_core::{
     find_git_dir, Blob, FileMode, LooseObjectStore, Object, ObjectId, ObjectType, Tree, TreeEntry,
 };
+use oxidize_index::{compute_status, write_tree, Index, IndexEntry, StagedChange, UnstagedChange};
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -498,6 +499,11 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
             tree_ish,
         } => cmd_ls_tree(recurse, long, tree_ish)?,
         Commands::Mktree => cmd_mktree()?,
+        Commands::Add { files } => cmd_add(files)?,
+        Commands::Status => cmd_status()?,
+        Commands::LsFiles { stage } => cmd_ls_files(stage)?,
+        Commands::UpdateIndex { add, files } => cmd_update_index(add, files)?,
+        Commands::WriteTree => cmd_write_tree()?,
         other => {
             println!("Command {:?} dispatched (stubbed in current phase)", other);
         }
@@ -732,5 +738,228 @@ fn cmd_mktree() -> Result<()> {
     let tree_obj = Object::Tree(tree);
     let oid = store.write_object(&tree_obj)?;
     println!("{}", oid);
+    Ok(())
+}
+
+fn get_head_info(
+    git_dir: &Path,
+    store: &LooseObjectStore,
+) -> Result<(String, Option<ObjectId>, Option<ObjectId>)> {
+    let head_path = git_dir.join("HEAD");
+    if !head_path.exists() {
+        return Ok(("master".to_string(), None, None));
+    }
+    let head_content = std::fs::read_to_string(head_path)?;
+    let head_content = head_content.trim();
+
+    if let Some(rest) = head_content.strip_prefix("ref: refs/heads/") {
+        let branch_name = rest.to_string();
+        let ref_path = git_dir.join("refs/heads").join(&branch_name);
+        if ref_path.exists() {
+            let commit_str = std::fs::read_to_string(ref_path)?.trim().to_string();
+            if let Ok(commit_oid) = commit_str.parse::<ObjectId>() {
+                if let Ok(Object::Commit(commit)) = store.read_object(&commit_oid) {
+                    return Ok((branch_name, Some(commit_oid), Some(commit.tree)));
+                }
+            }
+        }
+        return Ok((branch_name, None, None));
+    }
+
+    if let Ok(commit_oid) = head_content.parse::<ObjectId>() {
+        if let Ok(Object::Commit(commit)) = store.read_object(&commit_oid) {
+            return Ok(("detached".to_string(), Some(commit_oid), Some(commit.tree)));
+        }
+    }
+
+    Ok(("master".to_string(), None, None))
+}
+
+fn cmd_add(files: Vec<String>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let repo_root = git_dir.parent().context("git_dir has no parent")?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let index_path = git_dir.join("index");
+    let mut index = Index::load_from(&index_path)?;
+
+    for file_arg in files {
+        let target_path = if file_arg == "." {
+            repo_root.to_path_buf()
+        } else {
+            let p = Path::new(&file_arg);
+            if p.is_relative() {
+                std::env::current_dir()?.join(p)
+            } else {
+                p.to_path_buf()
+            }
+        };
+
+        add_path_to_index(&mut index, &store, repo_root, &target_path)?;
+    }
+
+    index.write_to(&index_path)?;
+    Ok(())
+}
+
+fn add_path_to_index(
+    index: &mut Index,
+    store: &LooseObjectStore,
+    repo_root: &Path,
+    target: &Path,
+) -> Result<()> {
+    if target.is_dir() {
+        for entry in std::fs::read_dir(target)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str == ".git" || name_str == "target" {
+                continue;
+            }
+            add_path_to_index(index, store, repo_root, &path)?;
+        }
+    } else if target.is_file() {
+        let rel_path = target
+            .strip_prefix(repo_root)
+            .with_context(|| format!("path '{}' is outside repository root", target.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        let data = std::fs::read(target)?;
+        let blob = Object::Blob(Blob::new(data));
+        let oid = store.write_object(&blob)?;
+
+        let meta = std::fs::metadata(target)?;
+        let entry = IndexEntry::from_fs_metadata(rel_path, oid, &meta, 0);
+        index.add_entry(entry);
+    }
+    Ok(())
+}
+
+fn cmd_status() -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let repo_root = git_dir.parent().context("git_dir has no parent")?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let index_path = git_dir.join("index");
+    let index = Index::load_from(&index_path)?;
+
+    let (branch_name, head_commit, head_tree) = get_head_info(&git_dir, &store)?;
+    let status = compute_status(repo_root, &index, head_tree.as_ref(), &store)?;
+
+    println!("On branch {}", branch_name);
+
+    if head_commit.is_none() {
+        println!("\nNo commits yet\n");
+    }
+
+    let mut clean = true;
+
+    if !status.staged.is_empty() {
+        clean = false;
+        println!("Changes to be committed:");
+        println!("  (use \"ox restore --staged <file>...\" to unstage)");
+        for change in &status.staged {
+            match change {
+                StagedChange::New(p) => println!("\tnew file:   {}", p),
+                StagedChange::Modified(p) => println!("\tmodified:   {}", p),
+                StagedChange::Deleted(p) => println!("\tdeleted:    {}", p),
+            }
+        }
+        println!();
+    }
+
+    if !status.unstaged.is_empty() {
+        clean = false;
+        println!("Changes not staged for commit:");
+        println!("  (use \"ox add <file>...\" to update what will be committed)");
+        for change in &status.unstaged {
+            match change {
+                UnstagedChange::Modified(p) => println!("\tmodified:   {}", p),
+                UnstagedChange::Deleted(p) => println!("\tdeleted:    {}", p),
+            }
+        }
+        println!();
+    }
+
+    if !status.untracked.is_empty() {
+        clean = false;
+        println!("Untracked files:");
+        println!("  (use \"ox add <file>...\" to include in what will be committed)");
+        for file in &status.untracked {
+            println!("\t{}", file);
+        }
+        println!();
+    }
+
+    if clean {
+        println!("nothing to commit, working tree clean");
+    }
+
+    Ok(())
+}
+
+fn cmd_ls_files(stage: bool) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let index_path = git_dir.join("index");
+    let index = Index::load_from(&index_path)?;
+
+    for entry in index.entries() {
+        if stage {
+            println!(
+                "{:06o} {} {}\t{}",
+                entry.mode, entry.oid, entry.stage, entry.path
+            );
+        } else {
+            println!("{}", entry.path);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_write_tree() -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let index_path = git_dir.join("index");
+    let index = Index::load_from(&index_path)?;
+
+    let tree_oid = write_tree(&index, &store)?;
+    println!("{}", tree_oid);
+    Ok(())
+}
+
+fn cmd_update_index(add: bool, files: Vec<String>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let repo_root = git_dir.parent().context("git_dir has no parent")?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let index_path = git_dir.join("index");
+    let mut index = Index::load_from(&index_path)?;
+
+    for file_str in files {
+        let p = Path::new(&file_str);
+        let abs = if p.is_relative() {
+            std::env::current_dir()?.join(p)
+        } else {
+            p.to_path_buf()
+        };
+
+        if abs.exists() {
+            let rel = abs
+                .strip_prefix(repo_root)
+                .with_context(|| format!("path '{}' is outside repository root", abs.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            let data = std::fs::read(&abs)?;
+            let blob = Object::Blob(Blob::new(data));
+            let oid = store.write_object(&blob)?;
+            let meta = std::fs::metadata(&abs)?;
+            let entry = IndexEntry::from_fs_metadata(rel, oid, &meta, 0);
+            index.add_entry(entry);
+        } else if !add {
+            bail!("cannot find file {}", file_str);
+        }
+    }
+
+    index.write_to(&index_path)?;
     Ok(())
 }
