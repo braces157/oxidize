@@ -97,3 +97,23 @@ This document records the architectural, design, and protocol decisions made dur
   - Tables: Lexicographically sorted OIDs, 4-byte IEEE 802.3 CRC32 checksums covering the entire packed slice (header + delta header + compressed bytes), 4-byte offsets and dynamic 8-byte large offset tables.
   - Trailing checksums: 20-byte pack checksum followed by 20-byte SHA-1 of the index itself.
   - `RepoObjectStore`: Transparent zero-copy memory-mapped access using `memmap2`, searching loose objects first and falling back to packfile indexes.
+
+## Phase 7: Networking & Smart HTTP Transport
+
+### DECISION 014: Git pkt-line Framing & Smart HTTP Client
+- **Date**: 2026-09-10
+- **Context**: Git network transport requires precise 4-hex-digit length-prefixed packet framing (`pkt-line`) with special markers (`0000` flush, `0001` delimiter, `0002` response end) and sideband multiplexing (channel 1: packfile data, channel 2: progress, channel 3: error).
+- **Decision**: Implemented `PktLine` parser/encoder and `SidebandDemuxer` in `oxidize-transport`:
+  - `SmartHttpClient` wraps `ureq` to communicate over Git Smart HTTP (`/info/refs?service=git-upload-pack`, `/git-upload-pack`, `/git-receive-pack`).
+  - Supports capability negotiation (`multi_ack_detailed`, `side-band-64k`, `ofs-delta`, `agent=ox/0.1.0`).
+
+### DECISION 015: Git Config INI Parser & Cross-Platform Path Normalization
+- **Date**: 2026-09-10
+- **Context**: Storing remotes and tracking branches requires reading and writing `.git/config`. On Windows, standard filesystem paths contain backslashes (`\`) which official Git parses as escape characters, causing syntax errors if written unescaped.
+- **Decision**: Implemented `GitConfig` INI parser/serializer in `oxidize-config`. When adding remotes or writing URLs, backslashes are systematically normalized to forward slashes (`/`), guaranteeing 100% compatibility with official `git` on all platforms.
+
+### DECISION 016: ObjectReader Trait & Local Transport Re-use
+- **Date**: 2026-09-10
+- **Context**: Cloning and checking out repositories where objects are bundled directly into packfiles (rather than loose objects) requires tree traversal and blob extraction without unpacking every object to disk.
+- **Decision**: Added `ObjectReader` trait in `oxidize-core` and implemented it for both `LooseObjectStore` and `RepoObjectStore`. `checkout_tree_and_update_index` accepts `&impl ObjectReader`, allowing `ox clone` to populate the working tree directly from freshly indexed packfiles with zero loose object unpacking. For local filesystem remotes, `resolve_local_path` discovers references across loose refs and `packed-refs`, and generates thin packfiles directly.
+

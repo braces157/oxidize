@@ -4,7 +4,7 @@ use crate::index::Index;
 use crate::IndexError;
 use oxidize_core::id::ObjectId;
 use oxidize_core::object::{FileMode, Object};
-use oxidize_core::store::LooseObjectStore;
+use oxidize_core::store::ObjectReader;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -20,29 +20,29 @@ pub enum StagedChange {
     Deleted(String),
 }
 
-/// Status category of an unstaged file (working tree vs index).
+/// Status category of a file in the working tree (working tree vs index).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnstagedChange {
-    /// File modified in working directory.
+    /// Modified in working tree compared to index.
     Modified(String),
-    /// File deleted from working directory.
+    /// Deleted in working tree compared to index.
     Deleted(String),
 }
 
-/// Consolidated repository status.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Overall repository status summarizing staged, unstaged, and untracked files.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RepoStatus {
-    /// Changes staged for commit (index vs HEAD).
+    /// Files staged for next commit.
     pub staged: Vec<StagedChange>,
-    /// Changes not staged for commit (working tree vs index).
+    /// Tracked files modified/deleted in working tree.
     pub unstaged: Vec<UnstagedChange>,
-    /// Files present in working tree but not tracked in index.
+    /// Untracked files in working tree.
     pub untracked: Vec<String>,
 }
 
 /// Recursively flattens a Tree object into a map of `relative_path -> (mode, oid)`.
 pub fn flatten_tree(
-    store: &LooseObjectStore,
+    store: &impl ObjectReader,
     tree_oid: &ObjectId,
     prefix: &str,
 ) -> Result<BTreeMap<String, (FileMode, ObjectId)>, IndexError> {
@@ -76,7 +76,7 @@ pub fn compute_status(
     repo_root: &Path,
     index: &Index,
     head_tree_oid: Option<&ObjectId>,
-    store: &LooseObjectStore,
+    store: &impl ObjectReader,
 ) -> Result<RepoStatus, IndexError> {
     let mut status = RepoStatus::default();
 

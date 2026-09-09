@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 oxidize-core.workspace = true
 oxidize-pack.workspace = true
+oxidize-refs.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
 

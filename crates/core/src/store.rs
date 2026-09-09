@@ -16,6 +16,18 @@ pub struct LooseObjectStore {
     root: PathBuf,
 }
 
+/// Trait for read-only object retrieval from storage (loose or packed).
+pub trait ObjectReader {
+    /// Reads and deserializes a Git object by ID.
+    fn read_object(&self, id: &ObjectId) -> Result<Object, CoreError>;
+}
+
+impl ObjectReader for LooseObjectStore {
+    fn read_object(&self, id: &ObjectId) -> Result<Object, CoreError> {
+        self.read_object(id)
+    }
+}
+
 impl LooseObjectStore {
     /// Creates a store pointing to `.git/objects/`.
     pub fn new(objects_dir: impl Into<PathBuf>) -> Self {

@@ -21,3 +21,6 @@ pub enum ConfigError {
     #[error("core error: {0}")]
     Core(#[from] oxidize_core::CoreError),
 }
+
+pub mod ini;
+pub use ini::{ConfigSectionKey, GitConfig};

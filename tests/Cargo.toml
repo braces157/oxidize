@@ -29,6 +29,10 @@ path = "branch_merge_compatibility_test.rs"
 name = "pack_compatibility_test"
 path = "pack_compatibility_test.rs"
 
+[[test]]
+name = "transport_compatibility_test"
+path = "transport_compatibility_test.rs"
+
 [dev-dependencies]
 oxidize-core.workspace = true
 oxidize-index.workspace = true

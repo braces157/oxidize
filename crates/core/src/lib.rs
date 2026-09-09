@@ -8,4 +8,4 @@ pub mod store;
 pub use error::CoreError;
 pub use id::ObjectId;
 pub use object::{Blob, Commit, FileMode, Object, ObjectType, Signature, Tag, Tree, TreeEntry};
-pub use store::{find_git_dir, LooseObjectStore};
+pub use store::{find_git_dir, LooseObjectStore, ObjectReader};

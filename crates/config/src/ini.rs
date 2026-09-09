@@ -1,0 +1,227 @@
+//! Git configuration file (`.git/config`, `~/.gitconfig`) INI parser and serializer.
+
+use crate::ConfigError;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+
+/// Key identifying a configuration section and optional subsection.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConfigSectionKey {
+    /// Section name, e.g. "core", "remote", "branch".
+    pub section: String,
+    /// Optional subsection, e.g. "origin" in `[remote "origin"]`.
+    pub subsection: Option<String>,
+}
+
+/// Parsed Git configuration file representation.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct GitConfig {
+    sections: BTreeMap<ConfigSectionKey, BTreeMap<String, String>>,
+}
+
+impl GitConfig {
+    /// Creates a new empty `GitConfig`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Loads and parses a config file from disk.
+    pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Ok(Self::new());
+        }
+        let content = fs::read_to_string(path)?;
+        Self::parse_str(&content)
+    }
+
+    /// Parses configuration text in Git INI format.
+    pub fn parse_str(content: &str) -> Result<Self, ConfigError> {
+        let mut config = Self::new();
+        let mut current_section: Option<ConfigSectionKey> = None;
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+
+            if line.starts_with('[') && line.ends_with(']') {
+                let inner = &line[1..line.len() - 1].trim();
+                if let Some(quote_start) = inner.find('"') {
+                    if let Some(quote_end) = inner.rfind('"') {
+                        if quote_end > quote_start {
+                            let sec = inner[..quote_start].trim().to_lowercase();
+                            let sub = inner[quote_start + 1..quote_end].to_string();
+                            current_section = Some(ConfigSectionKey {
+                                section: sec,
+                                subsection: Some(sub),
+                            });
+                            continue;
+                        }
+                    }
+                }
+                current_section = Some(ConfigSectionKey {
+                    section: inner.to_lowercase(),
+                    subsection: None,
+                });
+            } else if let Some(ref sec_key) = current_section {
+                if let Some(eq_idx) = line.find('=') {
+                    let key = line[..eq_idx].trim().to_lowercase();
+                    let raw_val = line[eq_idx + 1..].trim();
+                    let val =
+                        if raw_val.starts_with('"') && raw_val.ends_with('"') && raw_val.len() >= 2
+                        {
+                            &raw_val[1..raw_val.len() - 1]
+                        } else {
+                            raw_val
+                        };
+                    config
+                        .sections
+                        .entry(sec_key.clone())
+                        .or_default()
+                        .insert(key, val.to_string());
+                }
+            }
+        }
+
+        Ok(config)
+    }
+
+    /// Retrieves a value from the specified section and key.
+    pub fn get(&self, section: &str, subsection: Option<&str>, key: &str) -> Option<&str> {
+        let sec_key = ConfigSectionKey {
+            section: section.to_lowercase(),
+            subsection: subsection.map(|s| s.to_string()),
+        };
+        self.sections
+            .get(&sec_key)
+            .and_then(|entries| entries.get(&key.to_lowercase()).map(|s| s.as_str()))
+    }
+
+    /// Sets a value for the specified section, subsection, and key.
+    pub fn set(&mut self, section: &str, subsection: Option<&str>, key: &str, value: &str) {
+        let sec_key = ConfigSectionKey {
+            section: section.to_lowercase(),
+            subsection: subsection.map(|s| s.to_string()),
+        };
+        self.sections
+            .entry(sec_key)
+            .or_default()
+            .insert(key.to_lowercase(), value.to_string());
+    }
+
+    /// Removes a configuration section and all its entries.
+    pub fn remove_section(&mut self, section: &str, subsection: Option<&str>) -> bool {
+        let sec_key = ConfigSectionKey {
+            section: section.to_lowercase(),
+            subsection: subsection.map(|s| s.to_string()),
+        };
+        self.sections.remove(&sec_key).is_some()
+    }
+
+    /// Retrieves the URL for a named remote (e.g. "origin").
+    pub fn get_remote_url(&self, name: &str) -> Option<&str> {
+        self.get("remote", Some(name), "url")
+    }
+
+    /// Configures a remote with the specified URL and standard fetch refspec.
+    pub fn add_remote(&mut self, name: &str, url: &str) {
+        let normalized_url = url.replace('\\', "/");
+        self.set("remote", Some(name), "url", &normalized_url);
+        self.set(
+            "remote",
+            Some(name),
+            "fetch",
+            &format!("+refs/heads/*:refs/remotes/{}/*", name),
+        );
+    }
+
+    /// Removes a remote from the configuration.
+    pub fn remove_remote(&mut self, name: &str) -> bool {
+        self.remove_section("remote", Some(name))
+    }
+
+    /// Lists all configured remotes as `(name, url)`.
+    pub fn list_remotes(&self) -> Vec<(String, String)> {
+        let mut remotes = Vec::new();
+        for (sec, entries) in &self.sections {
+            if sec.section == "remote" {
+                if let Some(ref name) = sec.subsection {
+                    if let Some(url) = entries.get("url") {
+                        remotes.push((name.clone(), url.clone()));
+                    }
+                }
+            }
+        }
+        remotes
+    }
+
+    /// Serializes configuration back to Git INI format.
+    pub fn serialize(&self) -> String {
+        let mut out = String::new();
+        for (sec, entries) in &self.sections {
+            if let Some(ref sub) = sec.subsection {
+                out.push_str(&format!("[{} \"{}\"]\n", sec.section, sub));
+            } else {
+                out.push_str(&format!("[{}]\n", sec.section));
+            }
+            for (key, val) in entries {
+                out.push_str(&format!("\t{} = {}\n", key, val));
+            }
+        }
+        out
+    }
+
+    /// Saves configuration to a file on disk.
+    pub fn save_to_file(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
+        let serialized = self.serialize();
+        fs::write(path, serialized)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_git_config_parse_and_serialize() {
+        let sample = r#"
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = false
+[remote "origin"]
+	url = https://github.com/oxidize/ox.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "main"]
+	remote = origin
+	merge = refs/heads/main
+"#;
+
+        let mut config = GitConfig::parse_str(sample).unwrap();
+        assert_eq!(config.get("core", None, "bare"), Some("false"));
+        assert_eq!(
+            config.get_remote_url("origin"),
+            Some("https://github.com/oxidize/ox.git")
+        );
+        assert_eq!(
+            config.list_remotes(),
+            vec![(
+                "origin".to_string(),
+                "https://github.com/oxidize/ox.git".to_string()
+            )]
+        );
+
+        config.add_remote("upstream", "https://github.com/upstream/ox.git");
+        assert_eq!(
+            config.get_remote_url("upstream"),
+            Some("https://github.com/upstream/ox.git")
+        );
+
+        let serialized = config.serialize();
+        assert!(serialized.contains("[remote \"upstream\"]"));
+    }
+}

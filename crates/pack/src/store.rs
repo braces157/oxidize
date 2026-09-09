@@ -235,7 +235,15 @@ impl RepoObjectStore {
     pub fn write_blob(&self, data: &[u8]) -> Result<ObjectId, CoreError> {
         self.loose.write_blob(data)
     }
+}
 
+impl oxidize_core::ObjectReader for RepoObjectStore {
+    fn read_object(&self, id: &ObjectId) -> Result<Object, CoreError> {
+        self.read_object(id)
+    }
+}
+
+impl RepoObjectStore {
     /// Collects all objects (loose and packed) in the repository.
     pub fn collect_all_objects(&self) -> Result<Vec<RawPackObject>, CoreError> {
         let mut seen = std::collections::HashSet::new();

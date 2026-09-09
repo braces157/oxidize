@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use oxidize_config::GitConfig;
 use oxidize_core::store::parse_object_from_content;
 use oxidize_core::{
     find_git_dir, Blob, Commit, FileMode, LooseObjectStore, Object, ObjectId, ObjectType, Tree,
@@ -16,6 +17,9 @@ use oxidize_pack::{
     RepoObjectStore,
 };
 use oxidize_refs::{get_default_signature, RefStore};
+use oxidize_transport::{
+    discover_local_refs, fetch_local_pack, resolve_local_path, SmartHttpClient,
+};
 use sha1::{Digest, Sha1};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -553,6 +557,14 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
         Commands::VerifyPack { verbose, files } => cmd_verify_pack(verbose, files)?,
         Commands::Gc => cmd_gc()?,
         Commands::Fsck => cmd_fsck()?,
+        Commands::Clone {
+            repository,
+            directory,
+        } => cmd_clone(repository, directory)?,
+        Commands::Fetch { remote } => cmd_fetch(remote)?,
+        Commands::Pull { remote, branch } => cmd_pull(remote, branch)?,
+        Commands::Push { remote, branch } => cmd_push(remote, branch)?,
+        Commands::Remote { subcommand } => cmd_remote(subcommand)?,
         other => {
             println!("Command {:?} dispatched (stubbed in current phase)", other);
         }
@@ -1298,7 +1310,7 @@ fn cmd_commit_tree(tree: String, parents: Vec<String>, message: String) -> Resul
 
 fn checkout_tree_and_update_index(
     repo_root: &Path,
-    store: &LooseObjectStore,
+    store: &impl oxidize_core::ObjectReader,
     index: &mut Index,
     target_tree_oid: &ObjectId,
 ) -> Result<()> {
@@ -1993,5 +2005,356 @@ fn cmd_fsck() -> Result<()> {
         println!("dangling {} {}", t.as_str(), oid);
     }
 
+    Ok(())
+}
+
+fn cmd_clone(repository: String, directory: Option<String>) -> Result<()> {
+    let target_dir_str = if let Some(dir) = directory {
+        dir
+    } else {
+        let trimmed = repository.trim_end_matches('/').trim_end_matches(".git");
+        let name = trimmed.rsplit(['/', '\\']).next().unwrap_or("repo");
+        name.to_string()
+    };
+
+    let target_path = PathBuf::from(&target_dir_str);
+    if target_path.exists() && target_path.read_dir()?.next().is_some() {
+        bail!(
+            "destination path '{}' already exists and is not an empty directory.",
+            target_dir_str
+        );
+    }
+
+    println!("Cloning into '{}'...", target_dir_str);
+    std::fs::create_dir_all(&target_path)?;
+
+    // 1. Initialize empty Git repository in target_path
+    let git_dir = target_path.join(".git");
+    cmd_init(Some(target_dir_str.clone()))?;
+
+    // 2. Discover remote refs & fetch pack
+    let (remote_refs, default_branch, pack_bytes) =
+        if let Some(local_path) = resolve_local_path(&repository) {
+            let (refs, def_branch) = discover_local_refs(&local_path)?;
+            let wants: Vec<ObjectId> = refs.iter().map(|r| r.oid).collect();
+            let pack = if wants.is_empty() {
+                Vec::new()
+            } else {
+                fetch_local_pack(&local_path, &wants)?
+            };
+            (refs, def_branch, pack)
+        } else {
+            let client = SmartHttpClient::new();
+            let (refs, _caps, symref_head) = client.discover_upload_pack(&repository)?;
+            let wants: Vec<ObjectId> = refs.iter().map(|r| r.oid).collect();
+            let pack = if wants.is_empty() {
+                Vec::new()
+            } else {
+                let (p, _progress) = client.fetch_pack(&repository, &wants, &[])?;
+                p
+            };
+            (refs, symref_head, pack)
+        };
+
+    // Configure remote in .git/config
+    let config_path = git_dir.join("config");
+    let mut config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+    config.add_remote("origin", &repository);
+
+    if remote_refs.is_empty() || pack_bytes.is_empty() {
+        config.save_to_file(&config_path)?;
+        println!("warning: You appear to have cloned an empty repository.");
+        return Ok(());
+    }
+
+    // 3. Write packfile and index
+    let (indexed_objs, pack_checksum) = index_packfile(&pack_bytes)?;
+    let pack_dir = git_dir.join("objects").join("pack");
+    std::fs::create_dir_all(&pack_dir)?;
+    let pack_file = pack_dir.join(format!("pack-{}.pack", pack_checksum));
+    let idx_file = pack_dir.join(format!("pack-{}.idx", pack_checksum));
+    std::fs::write(&pack_file, &pack_bytes)?;
+    PackIndex::write_to(indexed_objs, &pack_checksum, &idx_file)?;
+
+    // 4. Determine default branch
+    let head_oid_opt = remote_refs.iter().find(|r| r.name == "HEAD").map(|r| r.oid);
+    let mut target_branch = "master".to_string();
+
+    if let Some(ref sym) = default_branch {
+        if let Some(b) = sym.strip_prefix("refs/heads/") {
+            target_branch = b.to_string();
+        }
+    } else if let Some(head_oid) = head_oid_opt {
+        for r in &remote_refs {
+            if r.oid == head_oid && r.name != "HEAD" && r.name.starts_with("refs/heads/") {
+                target_branch = r.name["refs/heads/".len()..].to_string();
+                break;
+            }
+        }
+    }
+
+    // Set up tracking config
+    config.set("branch", Some(&target_branch), "remote", "origin");
+    config.set(
+        "branch",
+        Some(&target_branch),
+        "merge",
+        &format!("refs/heads/{}", target_branch),
+    );
+    config.save_to_file(&config_path)?;
+
+    // 5. Update remote references and HEAD
+    let ref_store = RefStore::new(&git_dir);
+    for r in &remote_refs {
+        if let Some(branch) = r.name.strip_prefix("refs/heads/") {
+            let remote_ref_name = format!("refs/remotes/origin/{}", branch);
+            ref_store.update_ref(&remote_ref_name, &r.oid, None, "clone: from remote")?;
+
+            if branch == target_branch {
+                let local_ref_name = format!("refs/heads/{}", branch);
+                ref_store.update_ref(&local_ref_name, &r.oid, None, "clone: set local branch")?;
+                ref_store.set_head_symbolic(branch)?;
+            }
+        } else if let Some(tag) = r.name.strip_prefix("refs/tags/") {
+            let tag_ref_name = format!("refs/tags/{}", tag);
+            ref_store.update_ref(&tag_ref_name, &r.oid, None, "clone: set tag")?;
+        }
+    }
+
+    // 6. Checkout the default branch commit
+    let store = RepoObjectStore::open(&git_dir)?;
+    if let Ok(head_commit_oid) = ref_store.read_ref(&format!("refs/heads/{}", target_branch)) {
+        let obj = store.read_object(&head_commit_oid)?;
+        if let Object::Commit(commit) = obj {
+            let index_path = git_dir.join("index");
+            let mut index = Index::new();
+            checkout_tree_and_update_index(&target_path, &store, &mut index, &commit.tree)?;
+            index.write_to(&index_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_fetch(remote_opt: Option<String>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let config_path = git_dir.join("config");
+    let config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+
+    let remote_name = remote_opt.unwrap_or_else(|| "origin".to_string());
+    let url = config.get_remote_url(&remote_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "fatal: '{}' does not appear to be a git repository (no remote config found)",
+            remote_name
+        )
+    })?;
+
+    let store = RepoObjectStore::open(&git_dir)?;
+    let ref_store = RefStore::new(&git_dir);
+
+    let (remote_refs, pack_bytes) = if let Some(local_path) = resolve_local_path(url) {
+        let (refs, _) = discover_local_refs(&local_path)?;
+        let wants: Vec<ObjectId> = refs
+            .iter()
+            .filter(|r| !store.exists(&r.oid))
+            .map(|r| r.oid)
+            .collect();
+        let pack = if wants.is_empty() {
+            Vec::new()
+        } else {
+            fetch_local_pack(&local_path, &wants)?
+        };
+        (refs, pack)
+    } else {
+        let client = SmartHttpClient::new();
+        let (refs, _, _) = client.discover_upload_pack(url)?;
+        let wants: Vec<ObjectId> = refs
+            .iter()
+            .filter(|r| !store.exists(&r.oid))
+            .map(|r| r.oid)
+            .collect();
+        let pack = if wants.is_empty() {
+            Vec::new()
+        } else {
+            let (p, _) = client.fetch_pack(url, &wants, &[])?;
+            p
+        };
+        (refs, pack)
+    };
+
+    if !pack_bytes.is_empty() {
+        let (indexed_objs, pack_checksum) = index_packfile(&pack_bytes)?;
+        let pack_dir = git_dir.join("objects").join("pack");
+        std::fs::create_dir_all(&pack_dir)?;
+        let pack_file = pack_dir.join(format!("pack-{}.pack", pack_checksum));
+        let idx_file = pack_dir.join(format!("pack-{}.idx", pack_checksum));
+        std::fs::write(&pack_file, &pack_bytes)?;
+        PackIndex::write_to(indexed_objs, &pack_checksum, &idx_file)?;
+    }
+
+    for r in &remote_refs {
+        if let Some(branch) = r.name.strip_prefix("refs/heads/") {
+            let remote_ref_name = format!("refs/remotes/{}/{}", remote_name, branch);
+            ref_store.update_ref(
+                &remote_ref_name,
+                &r.oid,
+                None,
+                &format!("fetch: from {}", remote_name),
+            )?;
+            println!(
+                "   {} -> {}/{}",
+                &r.oid.to_string()[..7],
+                remote_name,
+                branch
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_pull(remote_opt: Option<String>, branch_opt: Option<String>) -> Result<()> {
+    cmd_fetch(remote_opt.clone())?;
+
+    let git_dir = find_git_dir(Path::new("."))?;
+    let ref_store = RefStore::new(&git_dir);
+    let (current_branch, _) = ref_store.resolve_head()?;
+
+    let remote_name = remote_opt.unwrap_or_else(|| "origin".to_string());
+    let branch_name = branch_opt.unwrap_or(current_branch);
+
+    let target_ref = format!("refs/remotes/{}/{}", remote_name, branch_name);
+    let target_oid = ref_store.read_ref(&target_ref)?;
+
+    cmd_merge(target_oid.to_string())?;
+    Ok(())
+}
+
+fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let config_path = git_dir.join("config");
+    let config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+
+    let remote_name = remote_opt.unwrap_or_else(|| "origin".to_string());
+    let url = config.get_remote_url(&remote_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "fatal: No configured push destination for remote '{}'",
+            remote_name
+        )
+    })?;
+
+    let ref_store = RefStore::new(&git_dir);
+    let branch = if let Some(b) = branch_opt {
+        b
+    } else {
+        let (curr, _) = ref_store.resolve_head()?;
+        curr
+    };
+
+    let local_ref_name = format!("refs/heads/{}", branch);
+    let local_oid = ref_store.read_ref(&local_ref_name)?;
+
+    // Discover remote refs
+    let (remote_refs, is_local) = if let Some(local_path) = resolve_local_path(url) {
+        let (refs, _) = discover_local_refs(&local_path)?;
+        (refs, Some(local_path))
+    } else {
+        let client = SmartHttpClient::new();
+        let (refs, _) = client.discover_receive_pack(url)?;
+        (refs, None)
+    };
+
+    let remote_target_name = format!("refs/heads/{}", branch);
+    let remote_old_oid = remote_refs
+        .iter()
+        .find(|r| r.name == remote_target_name)
+        .map(|r| r.oid)
+        .unwrap_or(ObjectId::ZERO);
+
+    // Pack objects reachable from local_oid
+    let store = RepoObjectStore::open(&git_dir)?;
+    let all_objects = store.collect_all_objects()?;
+    let (pack_bytes, _, _) = write_pack(&all_objects, true)?;
+
+    if let Some(dest_path) = is_local {
+        // Local destination repository
+        let dest_git_dir = if dest_path.join(".git").is_dir() {
+            dest_path.join(".git")
+        } else {
+            dest_path.clone()
+        };
+
+        // Write pack to destination
+        let (indexed_objs, pack_checksum) = index_packfile(&pack_bytes)?;
+        let pack_dir = dest_git_dir.join("objects").join("pack");
+        std::fs::create_dir_all(&pack_dir)?;
+        let pack_file = pack_dir.join(format!("pack-{}.pack", pack_checksum));
+        let idx_file = pack_dir.join(format!("pack-{}.idx", pack_checksum));
+        std::fs::write(&pack_file, &pack_bytes)?;
+        PackIndex::write_to(indexed_objs, &pack_checksum, &idx_file)?;
+
+        // Update branch ref in destination
+        let dest_ref_store = RefStore::new(&dest_git_dir);
+        dest_ref_store.update_ref(&remote_target_name, &local_oid, None, "push: from local")?;
+    } else {
+        let client = SmartHttpClient::new();
+        let report = client.push_pack(
+            url,
+            &[(&remote_old_oid, &local_oid, &remote_target_name)],
+            &pack_bytes,
+        )?;
+        if !report.is_empty() {
+            println!("{}", report);
+        }
+    }
+
+    // Update local remote tracking ref: refs/remotes/<remote>/<branch>
+    let tracking_ref = format!("refs/remotes/{}/{}", remote_name, branch);
+    ref_store.update_ref(
+        &tracking_ref,
+        &local_oid,
+        None,
+        &format!("push: update tracking ref {}", remote_name),
+    )?;
+
+    let old_short = if remote_old_oid.is_zero() {
+        "[new branch]".to_string()
+    } else {
+        format!(
+            "{}..{}",
+            &remote_old_oid.to_string()[..7],
+            &local_oid.to_string()[..7]
+        )
+    };
+    println!("To {}", url);
+    println!("   {} {} -> {}", old_short, branch, branch);
+
+    Ok(())
+}
+
+fn cmd_remote(subcommand_opt: Option<RemoteCommand>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let config_path = git_dir.join("config");
+    let mut config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+
+    match subcommand_opt {
+        None => {
+            for (name, _) in config.list_remotes() {
+                println!("{}", name);
+            }
+        }
+        Some(RemoteCommand::Add { name, url }) => {
+            config.add_remote(&name, &url);
+            config.save_to_file(&config_path)?;
+        }
+        Some(RemoteCommand::Remove { name }) => {
+            config.remove_remote(&name);
+            config.save_to_file(&config_path)?;
+            let remotes_dir = git_dir.join("refs").join("remotes").join(&name);
+            if remotes_dir.exists() {
+                let _ = std::fs::remove_dir_all(remotes_dir);
+            }
+        }
+    }
     Ok(())
 }

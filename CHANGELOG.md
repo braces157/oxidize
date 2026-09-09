@@ -47,3 +47,13 @@ All notable changes to the **Oxidize** project will be documented in this file.
 - Implemented zero-copy memory-mapped object store (`PackStore`, `RepoObjectStore`) with automatic packfile fallback.
 - Added plumbing & porcelain commands: `ox pack-objects`, `ox unpack-objects`, `ox index-pack`, `ox verify-pack`, `ox gc`, `ox fsck`.
 - Differential integration test suite (`tests/pack_compatibility_test.rs`) passing against official `git` (verifying pack integrity with `git verify-pack`, `git fsck --full`, and bidirectional commit log inspection).
+
+### Phase 7: Networking & Smart HTTP Transport (Completed)
+- Implemented Git pkt-line protocol framing (`encode_pkt_line`, `parse_pkt_line`, flush/delim/response-end) and sideband demultiplexing (`SidebandDemuxer`).
+- Implemented smart HTTP negotiation client (`SmartHttpClient` with `ureq`) supporting `git-upload-pack` and `git-receive-pack`.
+- Implemented local repository filesystem transport (`resolve_local_path`, `discover_local_refs`, `fetch_local_pack`) supporting both bare and non-bare repos with packed-refs.
+- Implemented full Git INI configuration parser and serializer (`GitConfig`) with URL path normalization.
+- Introduced `ObjectReader` trait in `oxidize-core` allowing zero-copy tree and index checkout straight from packfiles.
+- Added porcelain commands: `ox clone`, `ox fetch`, `ox pull`, `ox push`, `ox remote` (`add`, `remove`).
+- Differential integration test suite (`tests/transport_compatibility_test.rs`) passing against official `git` verifying bidirectional clone, push, pull, and remote tracking.
+
