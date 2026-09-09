@@ -39,6 +39,14 @@ pub enum CoreError {
     #[error("object not found: {0}")]
     ObjectNotFound(String),
 
+    /// Ambiguous short SHA-1 prefix matched multiple objects.
+    #[error("short SHA-1 {0} is ambiguous")]
+    AmbiguousPrefix(String),
+
+    /// Not a Git repository.
+    #[error("not a git repository (or any of the parent directories): .git")]
+    RepoNotFound,
+
     /// Standard I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

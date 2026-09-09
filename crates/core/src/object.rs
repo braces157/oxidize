@@ -75,6 +75,22 @@ impl FileMode {
     pub fn as_octal_str(&self) -> String {
         format!("{:o}", self.0)
     }
+
+    /// Returns the canonical object type associated with this mode.
+    pub fn object_type(&self) -> ObjectType {
+        if self.is_tree() {
+            ObjectType::Tree
+        } else if self.0 == Self::GITLINK.0 {
+            ObjectType::Commit
+        } else {
+            ObjectType::Blob
+        }
+    }
+
+    /// 6-character zero-padded octal string used in cat-file and ls-tree display.
+    pub fn display_str(&self) -> String {
+        format!("{:06o}", self.0)
+    }
 }
 
 /// A Blob object containing uninterpreted data.

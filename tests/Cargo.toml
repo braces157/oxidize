@@ -9,6 +9,10 @@ license.workspace = true
 name = "version_test"
 path = "version_test.rs"
 
+[[test]]
+name = "object_compatibility_test"
+path = "object_compatibility_test.rs"
+
 [dev-dependencies]
 oxidize-core.workspace = true
 oxidize-index.workspace = true

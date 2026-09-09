@@ -1,7 +1,12 @@
 //! `ox` — Production-quality, daily-driver-capable Git implementation in Rust.
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use oxidize_core::{
+    find_git_dir, Blob, FileMode, LooseObjectStore, Object, ObjectId, ObjectType, Tree, TreeEntry,
+};
+use std::io::{self, BufRead, Read, Write};
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -479,30 +484,253 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
             stdin,
             object_type,
             file,
-        } => {
-            println!(
-                "hash-object: write={}, stdin={}, type={}, file={:?}",
-                write, stdin, object_type, file
-            );
-        }
+        } => cmd_hash_object(write, stdin, object_type, file)?,
         Commands::CatFile {
             pretty,
             show_type,
             show_size,
             object,
-        } => {
-            println!(
-                "cat-file: -p={}, -t={}, -s={}, object={}",
-                pretty, show_type, show_size, object
-            );
-        }
-        Commands::Init { directory } => {
-            let target = directory.unwrap_or_else(|| ".".to_string());
-            println!("Initialized empty Git repository in {}", target);
-        }
+        } => cmd_cat_file(pretty, show_type, show_size, object)?,
+        Commands::Init { directory } => cmd_init(directory)?,
+        Commands::LsTree {
+            recurse,
+            long,
+            tree_ish,
+        } => cmd_ls_tree(recurse, long, tree_ish)?,
+        Commands::Mktree => cmd_mktree()?,
         other => {
-            println!("Command {:?} dispatched (stubbed in Phase 1)", other);
+            println!("Command {:?} dispatched (stubbed in current phase)", other);
         }
     }
+    Ok(())
+}
+
+fn cmd_hash_object(
+    write: bool,
+    stdin: bool,
+    object_type_str: String,
+    file: Option<String>,
+) -> Result<()> {
+    let data = if stdin {
+        let mut buf = Vec::new();
+        io::stdin().read_to_end(&mut buf)?;
+        buf
+    } else if let Some(path) = file {
+        std::fs::read(&path).with_context(|| format!("failed to read '{}'", path))?
+    } else {
+        bail!("no file or --stdin specified");
+    };
+
+    let obj_type: ObjectType = object_type_str.parse()?;
+    let object = match obj_type {
+        ObjectType::Blob => Object::Blob(Blob::new(data)),
+        ObjectType::Tree => {
+            let mut full_bytes = format!("tree {}\0", data.len()).into_bytes();
+            full_bytes.extend_from_slice(&data);
+            oxidize_core::store::parse_loose_object(&full_bytes)?
+        }
+        ObjectType::Commit => {
+            let mut full_bytes = format!("commit {}\0", data.len()).into_bytes();
+            full_bytes.extend_from_slice(&data);
+            oxidize_core::store::parse_loose_object(&full_bytes)?
+        }
+        ObjectType::Tag => {
+            let mut full_bytes = format!("tag {}\0", data.len()).into_bytes();
+            full_bytes.extend_from_slice(&data);
+            oxidize_core::store::parse_loose_object(&full_bytes)?
+        }
+    };
+
+    let oid = object.id();
+
+    if write {
+        let git_dir = find_git_dir(Path::new("."))?;
+        let store = LooseObjectStore::new(git_dir.join("objects"));
+        store.write_object(&object)?;
+    }
+
+    println!("{}", oid);
+    Ok(())
+}
+
+fn cmd_cat_file(pretty: bool, show_type: bool, show_size: bool, object_ref: String) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let oid = store.find_by_prefix(&object_ref)?;
+    let obj = store.read_object(&oid)?;
+
+    if show_type {
+        println!("{}", obj.object_type().as_str());
+        return Ok(());
+    }
+
+    if show_size {
+        println!("{}", obj.serialize_content().len());
+        return Ok(());
+    }
+
+    if pretty {
+        match obj {
+            Object::Blob(blob) => {
+                io::stdout().write_all(&blob.data)?;
+            }
+            Object::Tree(tree) => {
+                for entry in tree.entries {
+                    println!(
+                        "{} {} {}\t{}",
+                        entry.mode.display_str(),
+                        entry.mode.object_type().as_str(),
+                        entry.id,
+                        entry.name
+                    );
+                }
+            }
+            Object::Commit(_) | Object::Tag(_) => {
+                io::stdout().write_all(&obj.serialize_content())?;
+            }
+        }
+        return Ok(());
+    }
+
+    bail!("one of -p, -t, or -s must be specified");
+}
+
+fn cmd_init(directory: Option<String>) -> Result<()> {
+    let target = directory
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let git_dir = target.join(".git");
+
+    if git_dir.exists() {
+        println!(
+            "Reinitialized existing Git repository in {}",
+            git_dir.display()
+        );
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(git_dir.join("objects"))?;
+    std::fs::create_dir_all(git_dir.join("refs/heads"))?;
+    std::fs::create_dir_all(git_dir.join("refs/tags"))?;
+
+    // Default HEAD pointing to master
+    std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/master\n")?;
+
+    let config = "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n\tsymlinks = false\n\tignorecase = true\n";
+    std::fs::write(git_dir.join("config"), config)?;
+
+    println!("Initialized empty Git repository in {}", git_dir.display());
+    Ok(())
+}
+
+fn cmd_ls_tree(recurse: bool, long: bool, tree_ish: String) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let oid = store.find_by_prefix(&tree_ish)?;
+    let obj = store.read_object(&oid)?;
+
+    let tree_oid = match obj {
+        Object::Tree(_) => oid,
+        Object::Commit(commit) => commit.tree,
+        _ => bail!("not a tree-ish: {}", tree_ish),
+    };
+
+    print_tree_entries(&store, &tree_oid, "", recurse, long)?;
+    Ok(())
+}
+
+fn print_tree_entries(
+    store: &LooseObjectStore,
+    tree_oid: &ObjectId,
+    prefix: &str,
+    recurse: bool,
+    long: bool,
+) -> Result<()> {
+    let obj = store.read_object(tree_oid)?;
+    let tree = match obj {
+        Object::Tree(t) => t,
+        _ => bail!("expected tree object {}", tree_oid),
+    };
+
+    for entry in tree.entries {
+        let full_path = if prefix.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{}/{}", prefix, entry.name)
+        };
+
+        if entry.mode.is_tree() && recurse {
+            print_tree_entries(store, &entry.id, &full_path, recurse, long)?;
+        } else if long {
+            let size_str = if entry.mode.is_tree() {
+                "-".to_string()
+            } else {
+                let item = store.read_object(&entry.id)?;
+                format!("{}", item.serialize_content().len())
+            };
+            println!(
+                "{} {} {} {:>7}\t{}",
+                entry.mode.display_str(),
+                entry.mode.object_type().as_str(),
+                entry.id,
+                size_str,
+                full_path
+            );
+        } else {
+            println!(
+                "{} {} {}\t{}",
+                entry.mode.display_str(),
+                entry.mode.object_type().as_str(),
+                entry.id,
+                full_path
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_mktree() -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+
+    let stdin = io::stdin();
+    let mut entries = Vec::new();
+
+    for line_res in stdin.lock().lines() {
+        let line = line_res?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Format: "<mode> <type> <sha1>\t<name>"
+        let (left, name) = line
+            .split_once('\t')
+            .ok_or_else(|| anyhow::anyhow!("invalid mktree line (missing tab): {}", line))?;
+        let mut parts = left.split_whitespace();
+        let mode_str = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing mode in: {}", line))?;
+        let _type_str = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing type in: {}", line))?;
+        let sha_str = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing sha in: {}", line))?;
+
+        let mode_num = u32::from_str_radix(mode_str, 8)?;
+        let id: ObjectId = sha_str.parse()?;
+
+        entries.push(TreeEntry {
+            mode: FileMode(mode_num),
+            name: name.to_string(),
+            id,
+        });
+    }
+
+    let tree = Tree::new(entries);
+    let tree_obj = Object::Tree(tree);
+    let oid = store.write_object(&tree_obj)?;
+    println!("{}", oid);
     Ok(())
 }

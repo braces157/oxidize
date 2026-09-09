@@ -28,3 +28,16 @@ This document records the architectural, design, and protocol decisions made dur
 - **Date**: 2026-09-10
 - **Context**: Git repositories require paths in index entries and tree objects to use forward slashes (`/`) without leading slashes. On Windows, file paths use backslashes (`\`).
 - **Decision**: Enforce normalization of all relative working paths to forward-slash UTF-8 strings when interacting with Git index and tree objects.
+
+## Phase 2: Object Model & Content Store
+
+### DECISION 004: Canonical Tree Entry Ordering
+- **Date**: 2026-09-10
+- **Context**: Git trees require strict canonical sorting. If directory trees are not sorted as if their names have an appended trailing `/`, tree SHA-1 hashes diverge from Git's hashes whenever files and directories share a common prefix (e.g. `foo` directory vs `foo.txt` file).
+- **Decision**: Implement the canonical Git comparison rule in `Tree::new`: directory names are sorted with an implicit trailing slash `/`.
+
+### DECISION 005: Short SHA-1 Prefix Resolution & Ambiguity Detection
+- **Date**: 2026-09-10
+- **Context**: Commands like `git cat-file` and `git ls-tree` allow abbreviated object prefixes down to 4 characters.
+- **Decision**: Implement `find_by_prefix` in `LooseObjectStore`. If a prefix is shorter than 4 characters, return an error. If multiple matching objects are found in the 2-character hex directory, return `CoreError::AmbiguousPrefix`. If exactly one matches, resolve the full `ObjectId`.
+

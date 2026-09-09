@@ -80,6 +80,77 @@ impl LooseObjectStore {
 
         parse_loose_object(&decompressed)
     }
+
+    /// Resolves an object ID by full hex or prefix (at least 4 characters).
+    pub fn find_by_prefix(&self, prefix: &str) -> Result<ObjectId, CoreError> {
+        let prefix = prefix.trim();
+        if prefix.len() == 40 {
+            let oid: ObjectId = prefix.parse()?;
+            if self.exists(&oid) {
+                return Ok(oid);
+            } else {
+                return Err(CoreError::ObjectNotFound(prefix.to_string()));
+            }
+        }
+
+        if prefix.len() < 4 {
+            return Err(CoreError::InvalidObjectId(
+                "object prefix must be at least 4 characters".to_string(),
+            ));
+        }
+
+        let dir_prefix = &prefix[..2];
+        let file_prefix = &prefix[2..];
+        let dir_path = self.root.join(dir_prefix);
+
+        if !dir_path.exists() {
+            return Err(CoreError::ObjectNotFound(prefix.to_string()));
+        }
+
+        let mut matches = Vec::new();
+        for entry in fs::read_dir(dir_path)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with(file_prefix) && name_str.len() == 38 {
+                let full_hex = format!("{}{}", dir_prefix, name_str);
+                if let Ok(oid) = full_hex.parse::<ObjectId>() {
+                    matches.push(oid);
+                }
+            }
+        }
+
+        match matches.len() {
+            0 => Err(CoreError::ObjectNotFound(prefix.to_string())),
+            1 => Ok(matches[0]),
+            _ => Err(CoreError::AmbiguousPrefix(prefix.to_string())),
+        }
+    }
+
+    /// Convenience helper to create and store a Blob from byte slice.
+    pub fn write_blob(&self, data: &[u8]) -> Result<ObjectId, CoreError> {
+        let blob = Object::Blob(Blob::new(data.to_vec()));
+        self.write_object(&blob)
+    }
+}
+
+/// Locates the `.git` directory starting from `start` and traversing ancestors.
+pub fn find_git_dir(start: &Path) -> Result<PathBuf, CoreError> {
+    let mut current = if start.is_relative() {
+        std::env::current_dir()?.join(start)
+    } else {
+        start.to_path_buf()
+    };
+
+    loop {
+        let candidate = current.join(".git");
+        if candidate.is_dir() {
+            return Ok(candidate);
+        }
+        if !current.pop() {
+            return Err(CoreError::RepoNotFound);
+        }
+    }
 }
 
 /// Parses raw decompressed bytes into an `Object`.
