@@ -436,35 +436,5 @@ fn parse_tag_content(data: &[u8]) -> Result<Object, CoreError> {
 }
 
 fn parse_signature(s: &str) -> Result<Signature, CoreError> {
-    // Format: "Name <email> timestamp tz"
-    let open_bracket = s.find('<').ok_or_else(|| CoreError::ParseError {
-        object_type: "signature",
-        reason: "missing '<'".to_string(),
-    })?;
-    let close_bracket = s.find('>').ok_or_else(|| CoreError::ParseError {
-        object_type: "signature",
-        reason: "missing '>'".to_string(),
-    })?;
-
-    let name = s[..open_bracket].trim().to_string();
-    let email = s[open_bracket + 1..close_bracket].trim().to_string();
-    let rest = s[close_bracket + 1..].trim();
-    let mut rest_parts = rest.split_whitespace();
-    let time_str = rest_parts.next().ok_or_else(|| CoreError::ParseError {
-        object_type: "signature",
-        reason: "missing timestamp".to_string(),
-    })?;
-    let tz_offset = rest_parts.next().unwrap_or("+0000").to_string();
-
-    let time_seconds: i64 = time_str.parse().map_err(|_| CoreError::ParseError {
-        object_type: "signature",
-        reason: "invalid timestamp number".to_string(),
-    })?;
-
-    Ok(Signature {
-        name,
-        email,
-        time_seconds,
-        tz_offset,
-    })
+    Signature::parse(s)
 }

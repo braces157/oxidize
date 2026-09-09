@@ -57,3 +57,15 @@ All notable changes to the **Oxidize** project will be documented in this file.
 - Added porcelain commands: `ox clone`, `ox fetch`, `ox pull`, `ox push`, `ox remote` (`add`, `remove`).
 - Differential integration test suite (`tests/transport_compatibility_test.rs`) passing against official `git` verifying bidirectional clone, push, pull, and remote tracking.
 
+### Phase 8: Advanced Porcelain & UX (Completed)
+- Implemented `.gitignore` pattern parser and path matcher (`GitIgnore`, `IgnorePattern`) supporting wildcards, directory-only patterns, negation (`!`), and recursive globs (`**`).
+- Integrated `.gitignore` filtering into `ox status` and `ox add .`.
+- Added porcelain file management commands: `ox rm` (`--cached`, `-r`, `-f`), `ox mv`, `ox restore` (`--staged`).
+- Added tag manipulation command: `ox tag` (list, create lightweight or annotated tags with `-a`/`-m`, delete with `-d`).
+- Added working state stashing: `ox stash` (`push`, `pop`, `list`, `drop`) with dual-parent stash commit topology and reflog tracking.
+- Added history rewriting commands: `ox rebase` (linear commit replay with 3-way line merge), `ox cherry-pick`, `ox revert`.
+- Added history inspection commands: `ox blame` (line attribution via reverse topological commit walk) and `ox reflog` (`.git/logs/HEAD`).
+- Added binary search debugging: `ox bisect` (`start`, `bad`, `good`, `reset`) with logarithmic midpoint computation.
+- Differential integration test suite (`tests/advanced_porcelain_test.rs`) verifying all Phase 8 commands against official `git`.
+
+

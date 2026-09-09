@@ -33,6 +33,10 @@ path = "pack_compatibility_test.rs"
 name = "transport_compatibility_test"
 path = "transport_compatibility_test.rs"
 
+[[test]]
+name = "advanced_porcelain_test"
+path = "advanced_porcelain_test.rs"
+
 [dev-dependencies]
 oxidize-core.workspace = true
 oxidize-index.workspace = true

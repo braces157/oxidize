@@ -146,6 +146,11 @@ impl Index {
         self.entries.iter().find(|e| e.path == path && e.stage == 0)
     }
 
+    /// Alias for `find_entry`.
+    pub fn get_entry(&self, path: &str) -> Option<&IndexEntry> {
+        self.find_entry(path)
+    }
+
     /// Returns a slice of all staged entries.
     pub fn entries(&self) -> &[IndexEntry] {
         &self.entries

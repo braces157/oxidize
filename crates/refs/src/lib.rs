@@ -29,5 +29,5 @@ pub enum RefError {
 pub mod ref_store;
 pub mod signature;
 
-pub use ref_store::RefStore;
+pub use ref_store::{RefStore, ReflogEntry};
 pub use signature::get_default_signature;

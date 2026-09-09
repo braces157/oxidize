@@ -117,3 +117,24 @@ This document records the architectural, design, and protocol decisions made dur
 - **Context**: Cloning and checking out repositories where objects are bundled directly into packfiles (rather than loose objects) requires tree traversal and blob extraction without unpacking every object to disk.
 - **Decision**: Added `ObjectReader` trait in `oxidize-core` and implemented it for both `LooseObjectStore` and `RepoObjectStore`. `checkout_tree_and_update_index` accepts `&impl ObjectReader`, allowing `ox clone` to populate the working tree directly from freshly indexed packfiles with zero loose object unpacking. For local filesystem remotes, `resolve_local_path` discovers references across loose refs and `packed-refs`, and generates thin packfiles directly.
 
+## Phase 8: Advanced Porcelain & UX
+
+### DECISION 017: .gitignore Pattern Matcher & Decoupled Filtering Closure
+- **Date**: 2026-09-10
+- **Context**: Daily-driver operations like `status` and `add .` require ignoring compiler artifacts, temporary files, and directory patterns defined in `.gitignore` (with wildcards, directory markers, negations `!`, and recursive `**`).
+- **Decision**: Implemented `GitIgnore` and `IgnorePattern` in `oxidize-config`. Decoupled status scanning via `IgnoreFilter` closure in `oxidize-index`, allowing `compute_status_with_ignore` and recursive `add` to filter untracked files without circular crate dependencies.
+
+### DECISION 018: Multi-Parent Stash Commits & Reflog Stack
+- **Date**: 2026-09-10
+- **Context**: `git stash` produces a special commit structure where the index state is committed as parent 2 and the working tree state as the root commit with parent 1 = HEAD, and logs the history to `logs/refs/stash`.
+- **Decision**: Implemented `cmd_stash` (push, pop, list, drop) matching Git's exact dual-commit DAG topology, maintaining atomic stack state in `refs/stash` and `.git/logs/refs/stash`.
+
+### DECISION 019: Three-Way History Manipulation (Rebase, Cherry-Pick, Revert, Blame, Bisect)
+- **Date**: 2026-09-10
+- **Context**: Advanced workflows demand rewriting and inspecting history: linear replay (`rebase`), selective porting (`cherry-pick`), inverse commit application (`revert`), line-by-line attribution (`blame`), and binary search debugging (`bisect`).
+- **Decision**:
+  - `rebase`, `cherry-pick`, and `revert` utilize 3-way line merges with Myers diff against their respective base/parent commits, automatically staging clean merges or presenting conflict markers on divergence.
+  - `blame` traverses commit ancestry graphs via reverse topological BFS, mapping line survivals across diff hunk operations (`DiffOp::Keep`).
+  - `bisect` computes reachability frontiers using DAG sets and selects logarithmic bisect midpoints, recording state in `.git/BISECT_*`.
+
+

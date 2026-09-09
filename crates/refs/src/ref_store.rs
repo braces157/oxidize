@@ -10,6 +10,19 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// An entry in a reference log (`.git/logs/*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflogEntry {
+    /// Previous target object ID.
+    pub old_oid: ObjectId,
+    /// New target object ID.
+    pub new_oid: ObjectId,
+    /// Committer signature and timestamp.
+    pub signature: Signature,
+    /// Action and message.
+    pub message: String,
+}
+
 /// Access and manipulation of repository references.
 #[derive(Debug, Clone)]
 pub struct RefStore {
@@ -203,6 +216,69 @@ impl RefStore {
         writeln!(file, "{} {} {}\t{}", old_oid, new_oid, sig, message)?;
         file.flush()?;
         Ok(())
+    }
+
+    /// Reads all entries from `.git/logs/<ref_name>`.
+    pub fn read_reflog(&self, ref_name: &str) -> Result<Vec<ReflogEntry>, RefError> {
+        let log_path = self.git_dir.join("logs").join(ref_name);
+        if !log_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let content = fs::read_to_string(log_path)?;
+        let mut entries = Vec::new();
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            let (meta_part, message) = match line.split_once('\t') {
+                Some((meta, msg)) => (meta, msg.to_string()),
+                None => (line, String::new()),
+            };
+
+            let mut parts = meta_part.split_whitespace();
+            let old_str = match parts.next() {
+                Some(s) => s,
+                None => continue,
+            };
+            let new_str = match parts.next() {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let old_oid = match old_str.parse::<ObjectId>() {
+                Ok(oid) => oid,
+                Err(_) => continue,
+            };
+            let new_oid = match new_str.parse::<ObjectId>() {
+                Ok(oid) => oid,
+                Err(_) => continue,
+            };
+
+            let sig_start = (old_str.len() + 1 + new_str.len()).min(meta_part.len());
+            let sig_str = meta_part[sig_start..].trim();
+            let signature = match Signature::parse(sig_str) {
+                Ok(sig) => sig,
+                Err(_) => Signature {
+                    name: String::new(),
+                    email: String::new(),
+                    time_seconds: 0,
+                    tz_offset: "+0000".to_string(),
+                },
+            };
+
+            entries.push(ReflogEntry {
+                old_oid,
+                new_oid,
+                signature,
+                message,
+            });
+        }
+
+        Ok(entries)
     }
 
     /// Resolves a revision specifier (`HEAD`, `HEAD~2`, branch name, short/full SHA) to an `ObjectId`.

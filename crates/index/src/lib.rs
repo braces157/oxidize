@@ -37,5 +37,8 @@ pub mod tree;
 
 pub use entry::IndexEntry;
 pub use index::Index;
-pub use status::{compute_status, flatten_tree, RepoStatus, StagedChange, UnstagedChange};
+pub use status::{
+    compute_status, compute_status_with_ignore, flatten_tree, IgnoreFilter, RepoStatus,
+    StagedChange, UnstagedChange,
+};
 pub use tree::write_tree;

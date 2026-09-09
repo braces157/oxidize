@@ -71,12 +71,16 @@ pub fn flatten_tree(
     Ok(map)
 }
 
-/// Computes the complete repository status.
-pub fn compute_status(
+/// Closure type for ignore filtering: `(rel_path, is_dir) -> is_ignored`.
+pub type IgnoreFilter<'a> = &'a dyn Fn(&str, bool) -> bool;
+
+/// Computes the complete repository status, ignoring untracked files if matched by `is_ignored`.
+pub fn compute_status_with_ignore(
     repo_root: &Path,
     index: &Index,
     head_tree_oid: Option<&ObjectId>,
     store: &impl ObjectReader,
+    is_ignored: Option<IgnoreFilter>,
 ) -> Result<RepoStatus, IndexError> {
     let mut status = RepoStatus::default();
 
@@ -148,6 +152,7 @@ pub fn compute_status(
         repo_root,
         &tracked_or_ignored,
         &mut untracked_list,
+        is_ignored,
     )?;
     untracked_list.sort();
     status.untracked = untracked_list;
@@ -155,11 +160,22 @@ pub fn compute_status(
     Ok(status)
 }
 
+/// Computes the complete repository status with default filters.
+pub fn compute_status(
+    repo_root: &Path,
+    index: &Index,
+    head_tree_oid: Option<&ObjectId>,
+    store: &impl ObjectReader,
+) -> Result<RepoStatus, IndexError> {
+    compute_status_with_ignore(repo_root, index, head_tree_oid, store, None)
+}
+
 fn scan_untracked(
     root: &Path,
     current: &Path,
     tracked: &BTreeSet<String>,
     untracked: &mut Vec<String>,
+    is_ignored: Option<IgnoreFilter>,
 ) -> Result<(), IndexError> {
     if !current.exists() || !current.is_dir() {
         return Ok(());
@@ -171,7 +187,7 @@ fn scan_untracked(
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
-        if name_str == ".git" || name_str == "target" {
+        if name_str == ".git" {
             continue;
         }
 
@@ -181,12 +197,18 @@ fn scan_untracked(
             .to_string_lossy()
             .replace('\\', "/");
 
+        if let Some(check_ignore) = is_ignored {
+            if check_ignore(&rel_path, path.is_dir()) {
+                continue;
+            }
+        }
+
         if path.is_dir() {
             // Check if directory contains any tracked files
             let dir_prefix = format!("{}/", rel_path);
             let has_tracked = tracked.iter().any(|t| t.starts_with(&dir_prefix));
             if has_tracked {
-                scan_untracked(root, &path, tracked, untracked)?;
+                scan_untracked(root, &path, tracked, untracked, is_ignored)?;
             } else {
                 // Whole directory is untracked
                 untracked.push(format!("{}/", rel_path));

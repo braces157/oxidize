@@ -22,5 +22,7 @@ pub enum ConfigError {
     Core(#[from] oxidize_core::CoreError),
 }
 
+pub mod ignore;
 pub mod ini;
+pub use ignore::{GitIgnore, IgnorePattern};
 pub use ini::{ConfigSectionKey, GitConfig};
