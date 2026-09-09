@@ -37,6 +37,10 @@ path = "transport_compatibility_test.rs"
 name = "advanced_porcelain_test"
 path = "advanced_porcelain_test.rs"
 
+[[test]]
+name = "performance_benchmark_test"
+path = "performance_benchmark_test.rs"
+
 [dev-dependencies]
 oxidize-core.workspace = true
 oxidize-index.workspace = true

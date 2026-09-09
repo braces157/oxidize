@@ -455,6 +455,9 @@ enum Commands {
         /// Bisect subcommand
         args: Vec<String>,
     },
+
+    /// Launch interactive terminal UI dashboard
+    Ui,
 }
 
 #[derive(Subcommand, Debug)]
@@ -603,6 +606,10 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
         Commands::Blame { file } => cmd_blame(file)?,
         Commands::Bisect { args } => cmd_bisect(args)?,
         Commands::Reflog => cmd_reflog()?,
+        Commands::Ui => {
+            let git_dir = find_git_dir(Path::new("."))?;
+            oxidize_tui::run_tui(&git_dir)?;
+        }
         other => {
             println!("Command {:?} dispatched (stubbed in current phase)", other);
         }
@@ -882,6 +889,9 @@ fn cmd_add(files: Vec<String>) -> Result<()> {
     let mut index = Index::load_from(&index_path)?;
     let gitignore = GitIgnore::load_from_dir(repo_root).unwrap_or_default();
 
+    use rayon::prelude::*;
+
+    let mut all_files = Vec::new();
     for file_arg in files {
         let is_dot = file_arg == ".";
         let target_path = if is_dot {
@@ -895,27 +905,46 @@ fn cmd_add(files: Vec<String>) -> Result<()> {
             }
         };
 
-        add_path_to_index(
-            &mut index,
-            &store,
-            repo_root,
-            &target_path,
-            &gitignore,
-            is_dot,
-        )?;
+        collect_files_to_add(repo_root, &target_path, &gitignore, is_dot, &mut all_files)?;
+    }
+
+    all_files.sort();
+    all_files.dedup();
+
+    // Parallelize reading, hashing, and writing loose objects across threads with Rayon
+    let entries: Vec<Result<IndexEntry>> = all_files
+        .par_iter()
+        .map(|target| {
+            let rel_path = target
+                .strip_prefix(repo_root)
+                .with_context(|| format!("path '{}' is outside repository root", target.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            let data = std::fs::read(target)?;
+            let blob = Object::Blob(Blob::new(data));
+            let oid = store.write_object(&blob)?;
+
+            let meta = std::fs::metadata(target)?;
+            Ok(IndexEntry::from_fs_metadata(rel_path, oid, &meta, 0))
+        })
+        .collect();
+
+    for entry_res in entries {
+        let entry = entry_res?;
+        index.add_entry(entry);
     }
 
     index.write_to(&index_path)?;
     Ok(())
 }
 
-fn add_path_to_index(
-    index: &mut Index,
-    store: &LooseObjectStore,
+fn collect_files_to_add(
     repo_root: &Path,
     target: &Path,
     gitignore: &GitIgnore,
     recursing_all: bool,
+    out: &mut Vec<PathBuf>,
 ) -> Result<()> {
     if target.is_dir() {
         for entry in std::fs::read_dir(target)? {
@@ -932,7 +961,7 @@ fn add_path_to_index(
                     continue;
                 }
             }
-            add_path_to_index(index, store, repo_root, &path, gitignore, recursing_all)?;
+            collect_files_to_add(repo_root, &path, gitignore, recursing_all, out)?;
         }
     } else if target.is_file() {
         let rel_path = target
@@ -944,14 +973,7 @@ fn add_path_to_index(
         if recursing_all && gitignore.is_ignored(&rel_path, false) {
             return Ok(());
         }
-
-        let data = std::fs::read(target)?;
-        let blob = Object::Blob(Blob::new(data));
-        let oid = store.write_object(&blob)?;
-
-        let meta = std::fs::metadata(target)?;
-        let entry = IndexEntry::from_fs_metadata(rel_path, oid, &meta, 0);
-        index.add_entry(entry);
+        out.push(target.to_path_buf());
     }
     Ok(())
 }
@@ -1159,8 +1181,11 @@ fn cmd_commit(message: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_log(max_count: Option<usize>, oneline: bool, graph: bool, _tui: bool) -> Result<()> {
+fn cmd_log(max_count: Option<usize>, oneline: bool, graph: bool, tui: bool) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
+    if tui {
+        return Ok(oxidize_tui::run_tui(&git_dir)?);
+    }
     let store = RepoObjectStore::open(&git_dir)?;
     let ref_store = RefStore::new(&git_dir);
 

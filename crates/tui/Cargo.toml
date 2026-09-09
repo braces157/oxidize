@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 oxidize-core.workspace = true
+oxidize-index.workspace = true
 oxidize-refs.workspace = true
 oxidize-diff.workspace = true
 thiserror.workspace = true

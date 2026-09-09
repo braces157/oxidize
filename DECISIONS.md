@@ -137,4 +137,32 @@ This document records the architectural, design, and protocol decisions made dur
   - `blame` traverses commit ancestry graphs via reverse topological BFS, mapping line survivals across diff hunk operations (`DiffOp::Keep`).
   - `bisect` computes reachability frontiers using DAG sets and selects logarithmic bisect midpoints, recording state in `.git/BISECT_*`.
 
+## Phase 9: Polish, Performance & Deliverables
+
+### DECISION 020: Ratatui Interactive Terminal UI (TUI) Dashboard & Event Loop
+- **Date**: 2026-09-10
+- **Context**: Providing an intuitive, fast, interactive visual interface for exploring commit history, inspect commits, viewing unstaged/staged working tree status, and navigating repositories (`ox ui` or `ox log --tui`).
+- **Decision**: Implemented an interactive dashboard in `oxidize-tui` using `ratatui` (v0.29) and `crossterm` (v0.28):
+  - Architecture: State-machine based `App` maintaining selected commit, view modes (Log vs Status), commit detail caches, and status summaries.
+  - Raw Mode & Alternate Screen: Clean terminal lifecycle management entering alternate screen on startup and restoring normal terminal mode on exit (with panic hook safety).
+  - Event Loop: Non-blocking 50ms polling event loop processing keyboard navigation (`j`/`k`/arrows, `Tab` switching, `q`/`Esc` exit).
+  - Dual Command Integration: Accessible via dedicated `ox ui` subcommand or standard flag `ox log --tui`.
+
+### DECISION 021: Rayon Parallelized Packfile Delta Window Compression
+- **Date**: 2026-09-10
+- **Context**: Packfile generation (`ox pack-objects`, `ox gc`) is compute-intensive: sliding window delta matching and zlib compression become bottlenecks for large repositories when run sequentially.
+- **Decision**:
+  - Leveraged `rayon`'s parallel iterators (`par_iter()`) in `write_pack` across all available CPU threads.
+  - Objects are chunked across threads to evaluate candidate base objects in parallel within a sliding delta window (window size 10), selecting optimal bases that yield >20% reduction.
+  - Zlib deflate compression for both delta and base objects is executed concurrently across threads.
+  - The packfile is assembled sequentially in memory by resolving negative base-128 offsets against precomputed byte positions, preserving strict Git Packfile v2 conformance.
+
+### DECISION 022: Thread-Safe Atomic Loose Object Storage and Parallel `ox add`
+- **Date**: 2026-09-10
+- **Context**: Staging hundreds or thousands of files with `ox add .` involves filesystem traversal, reading file contents, computing SHA-1 hashes, and writing loose objects to `.git/objects/`. Running this sequentially underutilizes multi-core CPUs.
+- **Decision**:
+  - Hardened `LooseObjectStore::write_object` for thread safety: unique temporary files using nanosecond timestamps (`<oid>.<nanos>.tmp`) prevent race conditions during concurrent object creation, and benign rename collisions (identical content hashed simultaneously) are handled safely.
+  - In `cmd_add`, candidate files are discovered during directory traversal, sorted and deduplicated, then read, hashed, written to the loose object store, and converted to `IndexEntry` structs in parallel via Rayon. The resulting entries are sequentially inserted into the index and written to disk atomically.
+
+
 

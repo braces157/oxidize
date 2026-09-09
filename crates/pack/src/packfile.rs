@@ -160,65 +160,122 @@ pub fn decode_offset_delta(data: &[u8], mut cursor: usize) -> Result<(u64, usize
     Ok((ofs, cursor - start))
 }
 
+use rayon::prelude::*;
+
+enum PreparedPayload {
+    Base {
+        uncompressed_len: usize,
+        compressed: Vec<u8>,
+    },
+    Delta {
+        base_index: usize,
+        delta_len: usize,
+        compressed: Vec<u8>,
+    },
+}
+
 /// Writes a list of raw objects into a complete Git Packfile v2.
+/// Uses Rayon to parallelize delta compression and zlib encoding across threads.
 /// Returns `(pack_bytes, indexed_objects, pack_checksum)`.
 pub fn write_pack(
     objects: &[RawPackObject],
     enable_deltas: bool,
 ) -> Result<(Vec<u8>, Vec<IndexedObject>, ObjectId), PackError> {
-    let mut payload = Vec::new();
+    if objects.is_empty() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"PACK");
+        payload.write_u32::<BigEndian>(2)?;
+        payload.write_u32::<BigEndian>(0)?;
+        let mut hasher = Sha1::new();
+        hasher.update(&payload);
+        let pack_checksum = ObjectId::from_bytes(hasher.finalize().into());
+        payload.extend_from_slice(pack_checksum.as_bytes());
+        return Ok((payload, Vec::new(), pack_checksum));
+    }
 
-    // 1. Packfile header: "PACK", version 2, number of objects
+    // 1. Parallelize delta searching and zlib compression across threads using Rayon
+    let prepared: Vec<Result<PreparedPayload, PackError>> = (0..objects.len())
+        .into_par_iter()
+        .map(|i| {
+            let obj = &objects[i];
+            if enable_deltas && i > 0 && !obj.data.is_empty() {
+                let window_start = i.saturating_sub(10);
+                let mut best_base: Option<(usize, Vec<u8>)> = None;
+
+                for (b, base_obj) in objects.iter().enumerate().take(i).skip(window_start) {
+                    if base_obj.obj_type == obj.obj_type && !base_obj.data.is_empty() {
+                        let delta = crate::delta::create_delta(&base_obj.data, &obj.data);
+                        if delta.len() < (obj.data.len() * 4 / 5) {
+                            if let Some((_, ref best_delta)) = best_base {
+                                if delta.len() < best_delta.len() {
+                                    best_base = Some((b, delta));
+                                }
+                            } else {
+                                best_base = Some((b, delta));
+                            }
+                        }
+                    }
+                }
+
+                if let Some((best_idx, delta)) = best_base {
+                    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+                    encoder.write_all(&delta).map_err(PackError::Io)?;
+                    let compressed = encoder.finish().map_err(PackError::Io)?;
+                    return Ok(PreparedPayload::Delta {
+                        base_index: best_idx,
+                        delta_len: delta.len(),
+                        compressed,
+                    });
+                }
+            }
+
+            // Base object
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&obj.data).map_err(PackError::Io)?;
+            let compressed = encoder.finish().map_err(PackError::Io)?;
+            Ok(PreparedPayload::Base {
+                uncompressed_len: obj.data.len(),
+                compressed,
+            })
+        })
+        .collect();
+
+    // 2. Assemble packfile sequentially
+    let mut payload = Vec::new();
     payload.extend_from_slice(b"PACK");
     payload.write_u32::<BigEndian>(2)?;
     payload.write_u32::<BigEndian>(objects.len() as u32)?;
 
     let mut indexed_objects = Vec::with_capacity(objects.len());
-    let mut prev_offset: Option<u64> = None;
-    let mut prev_data: Option<&[u8]> = None;
-    let mut prev_type: Option<ObjectType> = None;
+    let mut offsets = Vec::with_capacity(objects.len());
 
-    // 2. Objects
-    for obj in objects {
+    for (i, item_res) in prepared.into_iter().enumerate() {
+        let item = item_res?;
         let start_offset = payload.len() as u64;
+        offsets.push(start_offset);
 
-        // Try OFS_DELTA if enabled and compatible with previous object
-        let mut wrote_delta = false;
-        if enable_deltas {
-            if let (Some(base_off), Some(base_data), Some(base_t)) =
-                (prev_offset, prev_data, prev_type)
-            {
-                if base_t == obj.obj_type && !base_data.is_empty() && !obj.data.is_empty() {
-                    let delta = crate::delta::create_delta(base_data, &obj.data);
-                    // Only use delta if it provides at least 20% size reduction
-                    if delta.len() < (obj.data.len() * 4 / 5) {
-                        let header = encode_object_header(OBJ_OFS_DELTA, delta.len());
-                        let ofs_bytes = encode_offset_delta(start_offset - base_off);
-
-                        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-                        encoder.write_all(&delta)?;
-                        let compressed = encoder.finish()?;
-
-                        payload.extend_from_slice(&header);
-                        payload.extend_from_slice(&ofs_bytes);
-                        payload.extend_from_slice(&compressed);
-
-                        wrote_delta = true;
-                    }
-                }
+        match item {
+            PreparedPayload::Base {
+                uncompressed_len,
+                compressed,
+            } => {
+                let type_code = type_to_code(objects[i].obj_type);
+                let header = encode_object_header(type_code, uncompressed_len);
+                payload.extend_from_slice(&header);
+                payload.extend_from_slice(&compressed);
             }
-        }
-
-        if !wrote_delta {
-            let type_code = type_to_code(obj.obj_type);
-            let header = encode_object_header(type_code, obj.data.len());
-
-            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-            encoder.write_all(&obj.data)?;
-            let compressed = encoder.finish()?;
-
-            payload.extend_from_slice(&header);
-            payload.extend_from_slice(&compressed);
+            PreparedPayload::Delta {
+                base_index,
+                delta_len,
+                compressed,
+            } => {
+                let base_offset = offsets[base_index];
+                let header = encode_object_header(OBJ_OFS_DELTA, delta_len);
+                let ofs_bytes = encode_offset_delta(start_offset - base_offset);
+                payload.extend_from_slice(&header);
+                payload.extend_from_slice(&ofs_bytes);
+                payload.extend_from_slice(&compressed);
+            }
         }
 
         let end_offset = payload.len();
@@ -228,14 +285,10 @@ pub fn write_pack(
         let crc32 = crc.sum();
 
         indexed_objects.push(IndexedObject {
-            oid: obj.oid,
+            oid: objects[i].oid,
             offset: start_offset,
             crc32,
         });
-
-        prev_offset = Some(start_offset);
-        prev_data = Some(&obj.data);
-        prev_type = Some(obj.obj_type);
     }
 
     // 3. Trailing 20-byte SHA-1 checksum of all preceding packfile bytes

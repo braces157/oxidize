@@ -66,14 +66,27 @@ impl LooseObjectStore {
 
         let serialized = object.serialize_with_header();
 
-        // Write to a temporary file in the same directory then atomically rename
-        let temp_path = path.with_extension("tmp");
+        // Write to a uniquely named temporary file in the same directory then atomically rename
+        let temp_filename = format!(
+            "{}.{}.tmp",
+            id.loose_file(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let temp_path = self.root.join(id.loose_dir()).join(temp_filename);
         let temp_file = File::create(&temp_path)?;
         let mut encoder = ZlibEncoder::new(temp_file, Compression::default());
         encoder.write_all(&serialized)?;
         encoder.finish()?;
 
-        fs::rename(temp_path, path)?;
+        if let Err(e) = fs::rename(&temp_path, &path) {
+            let _ = fs::remove_file(&temp_path);
+            if !path.exists() {
+                return Err(CoreError::Io(e));
+            }
+        }
 
         Ok(id)
     }
