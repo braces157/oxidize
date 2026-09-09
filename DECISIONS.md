@@ -65,5 +65,18 @@ This document records the architectural, design, and protocol decisions made dur
 - **Context**: Commits must update branch tips and HEAD atomically, recording an entry in `.git/logs/HEAD` and `.git/logs/refs/heads/<branch>` with old OID, new OID, signature, and message.
 - **Decision**: Implemented `RefStore::update_ref` with lockfiles (`<ref>.lock`), validation of expected previous commit, and simultaneous appending to both branch and HEAD reflogs.
 
+## Phase 5: Branching & Merging
+
+### DECISION 010: BFS Lowest Common Ancestor (LCA) Merge Base Resolution
+- **Date**: 2026-09-10
+- **Context**: Merging requires accurately discovering common commit ancestors between divergent branch tips across complex commit graphs.
+- **Decision**: Implemented `RefStore::find_merge_base` traversing all ancestors of the first commit into a visited set, followed by BFS on the second commit to return the first intersected ancestor.
+
+### DECISION 011: Three-Way Line Merge Engine with Conflict Markers
+- **Date**: 2026-09-10
+- **Context**: When both branches touch the same file since their common ancestor, Git performs a 3-way merge. Non-overlapping edits must merge cleanly without conflict, while overlapping conflicting edits must output standard conflict markers (`<<<<<<< HEAD`, `=======`, `>>>>>>>`).
+- **Decision**: Implemented `three_way_merge` in `oxidize-diff` aligning diff chunks relative to base lines. When conflicts occur, files are written with conflict markers and staged at stage 1 in the index, pausing the merge for user resolution.
+
+
 
 

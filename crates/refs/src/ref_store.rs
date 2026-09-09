@@ -317,6 +317,99 @@ impl RefStore {
         Ok(map)
     }
 
+    /// Creates a new branch reference pointing to `target_oid`.
+    pub fn create_branch(&self, name: &str, target_oid: &ObjectId) -> Result<(), RefError> {
+        let branch_path = self.git_dir.join("refs/heads").join(name);
+        if branch_path.exists() {
+            return Err(RefError::InvalidName(format!(
+                "a branch named '{}' already exists",
+                name
+            )));
+        }
+
+        if let Some(parent) = branch_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        fs::write(&branch_path, format!("{}\n", target_oid))?;
+        Ok(())
+    }
+
+    /// Deletes a branch reference.
+    pub fn delete_branch(&self, name: &str) -> Result<(), RefError> {
+        let branch_path = self.git_dir.join("refs/heads").join(name);
+        if !branch_path.exists() {
+            return Err(RefError::NotFound(format!("branch '{}' not found", name)));
+        }
+
+        fs::remove_file(branch_path)?;
+        Ok(())
+    }
+
+    /// Sets `HEAD` to point symbolically to a branch.
+    pub fn set_head_symbolic(&self, branch_name: &str) -> Result<(), RefError> {
+        let head_path = self.git_dir.join("HEAD");
+        fs::write(head_path, format!("ref: refs/heads/{}\n", branch_name))?;
+        Ok(())
+    }
+
+    /// Sets `HEAD` to a detached commit OID.
+    pub fn set_head_detached(&self, commit_oid: &ObjectId) -> Result<(), RefError> {
+        let head_path = self.git_dir.join("HEAD");
+        fs::write(head_path, format!("{}\n", commit_oid))?;
+        Ok(())
+    }
+
+    /// Finds the Lowest Common Ancestor (merge base) between two commits.
+    pub fn find_merge_base(
+        &self,
+        store: &LooseObjectStore,
+        commit_a: &ObjectId,
+        commit_b: &ObjectId,
+    ) -> Result<Option<ObjectId>, RefError> {
+        if commit_a == commit_b {
+            return Ok(Some(*commit_a));
+        }
+
+        // Collect all ancestors of commit_a
+        let mut ancestors_a = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(*commit_a);
+        ancestors_a.insert(*commit_a);
+
+        while let Some(curr) = queue.pop_front() {
+            if let Ok(Object::Commit(c)) = store.read_object(&curr) {
+                for p in c.parents {
+                    if ancestors_a.insert(p) {
+                        queue.push_back(p);
+                    }
+                }
+            }
+        }
+
+        // BFS ancestors of commit_b until hitting an ancestor of commit_a
+        let mut queue_b = std::collections::VecDeque::new();
+        let mut visited_b = std::collections::HashSet::new();
+        queue_b.push_back(*commit_b);
+        visited_b.insert(*commit_b);
+
+        while let Some(curr) = queue_b.pop_front() {
+            if ancestors_a.contains(&curr) {
+                return Ok(Some(curr));
+            }
+
+            if let Ok(Object::Commit(c)) = store.read_object(&curr) {
+                for p in c.parents {
+                    if visited_b.insert(p) {
+                        queue_b.push_back(p);
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     fn normalize_ref_name(&self, name: &str) -> String {
         if name.starts_with("refs/") || name == "HEAD" {
             name.to_string()

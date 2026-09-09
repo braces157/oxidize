@@ -6,7 +6,7 @@ use oxidize_core::{
     find_git_dir, Blob, Commit, FileMode, LooseObjectStore, Object, ObjectId, ObjectType, Tree,
     TreeEntry,
 };
-use oxidize_diff::format_unified_diff;
+use oxidize_diff::{format_unified_diff, three_way_merge};
 use oxidize_index::{
     compute_status, flatten_tree, write_tree, Index, IndexEntry, StagedChange, UnstagedChange,
 };
@@ -298,7 +298,7 @@ enum Commands {
         create_branch: Option<String>,
 
         /// Target branch or commit
-        target: String,
+        target: Option<String>,
     },
 
     /// Switch branches
@@ -308,7 +308,7 @@ enum Commands {
         create: Option<String>,
 
         /// Branch name
-        branch: String,
+        branch: Option<String>,
     },
 
     /// Join two or more development histories together
@@ -523,6 +523,24 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
             parents,
             message,
         } => cmd_commit_tree(tree, parents, message)?,
+        Commands::Branch {
+            delete,
+            force_delete,
+            all,
+            name,
+        } => cmd_branch(delete, force_delete, all, name)?,
+        Commands::Checkout {
+            create_branch,
+            target,
+        } => cmd_checkout(create_branch, target)?,
+        Commands::Switch { create, branch } => cmd_switch(create, branch)?,
+        Commands::Merge { commit } => cmd_merge(commit)?,
+        Commands::Reset {
+            hard,
+            soft,
+            mixed,
+            commit,
+        } => cmd_reset(hard, soft, mixed, commit)?,
         other => {
             println!("Command {:?} dispatched (stubbed in current phase)", other);
         }
@@ -1263,5 +1281,371 @@ fn cmd_commit_tree(tree: String, parents: Vec<String>, message: String) -> Resul
 
     let commit_oid = store.write_object(&Object::Commit(commit))?;
     println!("{}", commit_oid);
+    Ok(())
+}
+
+fn checkout_tree_and_update_index(
+    repo_root: &Path,
+    store: &LooseObjectStore,
+    index: &mut Index,
+    target_tree_oid: &ObjectId,
+) -> Result<()> {
+    let target_map = flatten_tree(store, target_tree_oid, "")?;
+
+    // 1. Remove files from working tree that are in old index but not in new target tree
+    for entry in index.entries() {
+        if !target_map.contains_key(&entry.path) {
+            let full_path = repo_root.join(&entry.path);
+            if full_path.exists() {
+                let _ = std::fs::remove_file(&full_path);
+            }
+        }
+    }
+
+    // 2. Write new files to working tree and create new index entries
+    index.entries.clear();
+    for (path, (_mode, oid)) in target_map {
+        let full_path = repo_root.join(&path);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let obj = store.read_object(&oid)?;
+        if let Object::Blob(blob) = obj {
+            std::fs::write(&full_path, &blob.data)?;
+        }
+
+        if let Ok(meta) = std::fs::metadata(&full_path) {
+            let entry = IndexEntry::from_fs_metadata(path, oid, &meta, 0);
+            index.add_entry(entry);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_branch(delete: bool, force_delete: bool, _all: bool, name: Option<String>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let ref_store = RefStore::new(&git_dir);
+
+    if delete || force_delete {
+        let branch_name = name.context("branch name required to delete")?;
+        let (active_branch, _) = ref_store.resolve_head()?;
+        if active_branch == branch_name {
+            bail!("cannot delete branch '{}' checked out", branch_name);
+        }
+        ref_store.delete_branch(&branch_name)?;
+        println!("Deleted branch {}.", branch_name);
+        return Ok(());
+    }
+
+    if let Some(branch_name) = name {
+        let (_, head_oid) = ref_store.resolve_head()?;
+        let target_oid = head_oid.context("cannot create branch: HEAD has no commits")?;
+        ref_store.create_branch(&branch_name, &target_oid)?;
+        return Ok(());
+    }
+
+    // List branches
+    let branches = ref_store.list_branches()?;
+    let (active_branch, _) = ref_store.resolve_head()?;
+
+    for (b_name, _) in branches {
+        if b_name == active_branch {
+            println!("* {}", b_name);
+        } else {
+            println!("  {}", b_name);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_checkout(create_branch: Option<String>, target: Option<String>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let repo_root = git_dir.parent().context("git_dir has no parent")?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let ref_store = RefStore::new(&git_dir);
+    let index_path = git_dir.join("index");
+    let mut index = Index::load_from(&index_path)?;
+
+    if let Some(new_branch) = create_branch {
+        let (_, head_oid) = ref_store.resolve_head()?;
+        let target_oid = head_oid.context("cannot checkout new branch: HEAD has no commits")?;
+        ref_store.create_branch(&new_branch, &target_oid)?;
+        ref_store.set_head_symbolic(&new_branch)?;
+        println!("Switched to a new branch '{}'", new_branch);
+        return Ok(());
+    }
+
+    let target = target.context("branch or commit target required")?;
+
+    // Check if target is a branch name
+    let branch_ref = format!("refs/heads/{}", target);
+    if let Ok(commit_oid) = ref_store.read_ref(&branch_ref) {
+        let obj = store.read_object(&commit_oid)?;
+        let commit = match obj {
+            Object::Commit(c) => c,
+            _ => bail!("object {} is not a commit", commit_oid),
+        };
+
+        checkout_tree_and_update_index(repo_root, &store, &mut index, &commit.tree)?;
+        index.write_to(&index_path)?;
+        ref_store.set_head_symbolic(&target)?;
+        println!("Switched to branch '{}'", target);
+        return Ok(());
+    }
+
+    // Otherwise try resolving revision as commit
+    if let Ok(commit_oid) = ref_store.resolve_rev(&target, &store) {
+        let obj = store.read_object(&commit_oid)?;
+        let commit = match obj {
+            Object::Commit(c) => c,
+            _ => bail!("object {} is not a commit", commit_oid),
+        };
+
+        checkout_tree_and_update_index(repo_root, &store, &mut index, &commit.tree)?;
+        index.write_to(&index_path)?;
+        ref_store.set_head_detached(&commit_oid)?;
+        println!(
+            "Note: switching to '{}' (detached HEAD)",
+            &commit_oid.to_string()[..7]
+        );
+        return Ok(());
+    }
+
+    bail!(
+        "pathspec or branch '{}' did not match any file(s) known to git",
+        target
+    );
+}
+
+fn cmd_switch(create: Option<String>, branch: Option<String>) -> Result<()> {
+    if let Some(new_branch) = create {
+        cmd_checkout(Some(new_branch), branch)
+    } else {
+        cmd_checkout(None, branch)
+    }
+}
+
+fn cmd_merge(commit_arg: String) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let repo_root = git_dir.parent().context("git_dir has no parent")?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let ref_store = RefStore::new(&git_dir);
+    let index_path = git_dir.join("index");
+    let mut index = Index::load_from(&index_path)?;
+
+    let (our_branch, our_oid_opt) = ref_store.resolve_head()?;
+    let our_oid = our_oid_opt.context("cannot merge: HEAD has no commits")?;
+    let their_oid = ref_store.resolve_rev(&commit_arg, &store)?;
+
+    let merge_base_opt = ref_store.find_merge_base(&store, &our_oid, &their_oid)?;
+    let merge_base = match merge_base_opt {
+        Some(base) => base,
+        None => bail!("refusing to merge unrelated histories"),
+    };
+
+    if merge_base == their_oid {
+        println!("Already up to date.");
+        return Ok(());
+    }
+
+    let our_commit = match store.read_object(&our_oid)? {
+        Object::Commit(c) => c,
+        _ => bail!("our commit not found"),
+    };
+    let their_commit = match store.read_object(&their_oid)? {
+        Object::Commit(c) => c,
+        _ => bail!("their commit not found"),
+    };
+
+    if merge_base == our_oid {
+        // Fast-forward merge!
+        checkout_tree_and_update_index(repo_root, &store, &mut index, &their_commit.tree)?;
+        index.write_to(&index_path)?;
+        ref_store.update_ref(
+            &our_branch,
+            &their_oid,
+            Some(&our_oid),
+            &format!("merge {}: Fast-forward", commit_arg),
+        )?;
+        println!(
+            "Updating {}..{}",
+            &our_oid.to_string()[..7],
+            &their_oid.to_string()[..7]
+        );
+        println!("Fast-forward");
+        return Ok(());
+    }
+
+    // 3-way merge
+    let base_commit = match store.read_object(&merge_base)? {
+        Object::Commit(c) => c,
+        _ => bail!("base commit not found"),
+    };
+
+    let base_files = flatten_tree(&store, &base_commit.tree, "")?;
+    let our_files = flatten_tree(&store, &our_commit.tree, "")?;
+    let their_files = flatten_tree(&store, &their_commit.tree, "")?;
+
+    let mut all_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for p in base_files.keys() {
+        all_paths.insert(p.clone());
+    }
+    for p in our_files.keys() {
+        all_paths.insert(p.clone());
+    }
+    for p in their_files.keys() {
+        all_paths.insert(p.clone());
+    }
+
+    let mut had_conflicts = false;
+
+    for path in all_paths {
+        let base_text = get_blob_text(&store, base_files.get(&path).map(|(_, id)| id));
+        let our_text = get_blob_text(&store, our_files.get(&path).map(|(_, id)| id));
+        let their_text = get_blob_text(&store, their_files.get(&path).map(|(_, id)| id));
+
+        let merged = three_way_merge(&base_text, &our_text, &their_text, "HEAD", &commit_arg);
+        let full_path = repo_root.join(&path);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        std::fs::write(&full_path, merged.content.as_bytes())?;
+
+        let blob = Object::Blob(Blob::new(merged.content.into_bytes()));
+        let blob_oid = store.write_object(&blob)?;
+        if let Ok(meta) = std::fs::metadata(&full_path) {
+            let stage = if merged.has_conflicts { 1 } else { 0 };
+            index.add_entry(IndexEntry::from_fs_metadata(
+                path.clone(),
+                blob_oid,
+                &meta,
+                stage,
+            ));
+        }
+
+        if merged.has_conflicts {
+            had_conflicts = true;
+            println!("CONFLICT (content): Merge conflict in {}", path);
+        }
+    }
+
+    index.write_to(&index_path)?;
+
+    if had_conflicts {
+        println!("Automatic merge failed; fix conflicts and then commit the result.");
+    } else {
+        // Automatic merge commit
+        let tree_oid = write_tree(&index, &store)?;
+        let sig = get_default_signature(Some(&git_dir));
+        let merge_commit = Commit {
+            tree: tree_oid,
+            parents: vec![our_oid, their_oid],
+            author: sig.clone(),
+            committer: sig,
+            gpg_sig: None,
+            message: format!("Merge branch '{}'\n", commit_arg),
+        };
+        let merge_oid = store.write_object(&Object::Commit(merge_commit))?;
+        ref_store.update_ref(
+            &our_branch,
+            &merge_oid,
+            Some(&our_oid),
+            &format!("merge {}", commit_arg),
+        )?;
+        println!("Merge made by the 'ort' strategy.");
+    }
+
+    Ok(())
+}
+
+fn get_blob_text(store: &LooseObjectStore, oid_opt: Option<&ObjectId>) -> String {
+    if let Some(oid) = oid_opt {
+        if let Ok(Object::Blob(b)) = store.read_object(oid) {
+            return String::from_utf8_lossy(&b.data).to_string();
+        }
+    }
+    String::new()
+}
+
+fn cmd_reset(hard: bool, soft: bool, _mixed: bool, commit_arg: Option<String>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let repo_root = git_dir.parent().context("git_dir has no parent")?;
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let ref_store = RefStore::new(&git_dir);
+    let index_path = git_dir.join("index");
+    let mut index = Index::load_from(&index_path)?;
+
+    let target_str = commit_arg.unwrap_or_else(|| "HEAD".to_string());
+    let target_oid = ref_store.resolve_rev(&target_str, &store)?;
+    let (active_branch, _) = ref_store.resolve_head()?;
+
+    let target_commit = match store.read_object(&target_oid)? {
+        Object::Commit(c) => c,
+        _ => bail!("target is not a commit"),
+    };
+
+    if soft {
+        ref_store.update_ref(
+            &active_branch,
+            &target_oid,
+            None,
+            &format!("reset: moving to {}", target_str),
+        )?;
+        return Ok(());
+    }
+
+    if hard {
+        checkout_tree_and_update_index(repo_root, &store, &mut index, &target_commit.tree)?;
+        index.write_to(&index_path)?;
+        ref_store.update_ref(
+            &active_branch,
+            &target_oid,
+            None,
+            &format!("reset: moving to {}", target_str),
+        )?;
+        println!(
+            "HEAD is now at {} {}",
+            &target_oid.to_string()[..7],
+            target_commit.message.lines().next().unwrap_or("")
+        );
+        return Ok(());
+    }
+
+    // Default mixed: reset index to target commit tree
+    let target_map = flatten_tree(&store, &target_commit.tree, "")?;
+    index.entries.clear();
+    for (path, (mode, oid)) in target_map {
+        let full_path = repo_root.join(&path);
+        let meta = std::fs::metadata(&full_path).ok();
+        let file_size = meta.as_ref().map(|m| m.len() as u32).unwrap_or(0);
+        index.add_entry(IndexEntry {
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            dev: 0,
+            ino: 0,
+            mode: mode.0,
+            uid: 0,
+            gid: 0,
+            file_size,
+            oid,
+            stage: 0,
+            assume_valid: false,
+            path,
+        });
+    }
+    index.write_to(&index_path)?;
+    ref_store.update_ref(
+        &active_branch,
+        &target_oid,
+        None,
+        &format!("reset: moving to {}", target_str),
+    )?;
+
     Ok(())
 }

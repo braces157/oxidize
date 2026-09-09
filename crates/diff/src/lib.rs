@@ -25,8 +25,10 @@ pub enum DiffError {
     Core(#[from] oxidize_core::CoreError),
 }
 
+pub mod merge;
 pub mod myers;
 pub mod unified;
 
+pub use merge::{three_way_merge, MergeResult};
 pub use myers::{myers_diff, DiffOp};
 pub use unified::{format_unified_diff, Hunk};

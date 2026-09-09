@@ -30,3 +30,11 @@ All notable changes to the **Oxidize** project will be documented in this file.
 - Implemented reference storage (`RefStore`), atomic updates, reflog tracking, and revision resolver (`rev-parse`) in `oxidize-refs`.
 - Implemented core porcelain commands: `ox commit` (with automated signature & tree generation), `ox log` (`--oneline`, `--graph`), `ox diff` (working tree and `--staged`), `ox rev-parse`, and `ox commit-tree`.
 - Differential integration test suite (`tests/porcelain_compatibility_test.rs`) verifying two-way commit history and diff interoperability with official `git`.
+
+### Phase 5: Branching & Merging (Completed)
+- Implemented branch reference manipulation (`list_branches`, `create_branch`, `delete_branch`), symbolic and detached HEAD switching.
+- Implemented safe working-tree and index checkout engine (`checkout_tree_and_update_index`).
+- Implemented LCA merge base discovery (`find_merge_base`) on the commit DAG.
+- Implemented 3-way line merge with conflict markers synthesis and automated merge commits.
+- Implemented commands: `ox branch`, `ox checkout`, `ox switch`, `ox merge`, and `ox reset` (`--soft`, `--mixed`, `--hard`).
+- Differential integration test suite (`tests/branch_merge_compatibility_test.rs`) passing against official `git`.
