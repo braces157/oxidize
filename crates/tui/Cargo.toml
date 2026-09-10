@@ -11,6 +11,7 @@ oxidize-index.workspace = true
 oxidize-refs.workspace = true
 oxidize-diff.workspace = true
 oxidize-pack.workspace = true
+oxidize-config.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 ratatui.workspace = true
