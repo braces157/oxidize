@@ -8,40 +8,45 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-/// Renders the complete authentic LazyGit interface onto the terminal frame.
-pub fn render(frame: &mut Frame, app: &App) {
-    let size = frame.area();
+/// Computed bounding geometry for all panels and views in the LazyGit dashboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppLayout {
+    pub screen: Rect,
+    pub workspace: Rect,
+    pub left_dock: Rect,
+    pub status_panel: Rect,
+    pub files_panel: Rect,
+    pub branches_panel: Rect,
+    pub commits_panel: Rect,
+    pub stash_panel: Rect,
+    pub inspector: Rect,
+    pub footer: Rect,
+}
 
+/// Computes the complete deterministic layout rectangles for the current screen size.
+pub fn compute_layout(size: Rect) -> Option<AppLayout> {
     if size.width < 20 || size.height < 6 {
-        let msg =
-            Paragraph::new("Terminal window too small").style(Style::default().fg(Color::Yellow));
-        frame.render_widget(msg, size);
-        return;
+        return None;
     }
 
-    // Vertical layout: Main Workspace (Min 0), Bottom Status/Feedback Bar (1)
+    // Vertical layout: Main Workspace (Min 6), Bottom Status/Feedback Bar (1)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(6), Constraint::Length(1)])
         .split(size);
 
-    render_workspace(frame, app, chunks[0]);
-    render_footer(frame, app, chunks[1]);
-    render_modals(frame, app);
-}
+    let workspace = chunks[0];
+    let footer = chunks[1];
 
-fn render_workspace(frame: &mut Frame, app: &App, area: Rect) {
     // Horizontal layout: Left Dock (35%), Right Inspector (65%)
     let h_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(area);
+        .split(workspace);
 
-    render_left_dock(frame, app, h_chunks[0]);
-    render_inspector(frame, app, h_chunks[1]);
-}
+    let left_dock = h_chunks[0];
+    let inspector = h_chunks[1];
 
-fn render_left_dock(frame: &mut Frame, app: &App, area: Rect) {
     // Left dock 5-panel split: Status (5 lines), Files (35%), Branches (24%), Commits (26%), Stash (Min 4)
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -52,13 +57,44 @@ fn render_left_dock(frame: &mut Frame, app: &App, area: Rect) {
             Constraint::Percentage(26),
             Constraint::Min(4),
         ])
-        .split(area);
+        .split(left_dock);
 
-    render_status_panel(frame, app, v_chunks[0]);
-    render_files_panel(frame, app, v_chunks[1]);
-    render_branches_panel(frame, app, v_chunks[2]);
-    render_commits_panel(frame, app, v_chunks[3]);
-    render_stash_panel(frame, app, v_chunks[4]);
+    Some(AppLayout {
+        screen: size,
+        workspace,
+        left_dock,
+        status_panel: v_chunks[0],
+        files_panel: v_chunks[1],
+        branches_panel: v_chunks[2],
+        commits_panel: v_chunks[3],
+        stash_panel: v_chunks[4],
+        inspector,
+        footer,
+    })
+}
+
+/// Renders the complete authentic LazyGit interface onto the terminal frame.
+pub fn render(frame: &mut Frame, app: &App) {
+    let size = frame.area();
+
+    let layout = match compute_layout(size) {
+        Some(l) => l,
+        None => {
+            let msg = Paragraph::new("Terminal window too small")
+                .style(Style::default().fg(Color::Yellow));
+            frame.render_widget(msg, size);
+            return;
+        }
+    };
+
+    render_status_panel(frame, app, layout.status_panel);
+    render_files_panel(frame, app, layout.files_panel);
+    render_branches_panel(frame, app, layout.branches_panel);
+    render_commits_panel(frame, app, layout.commits_panel);
+    render_stash_panel(frame, app, layout.stash_panel);
+    render_inspector(frame, app, layout.inspector);
+    render_footer(frame, app, layout.footer);
+    render_modals(frame, app);
 }
 
 fn is_panel_active(app: &App, panel: Panel) -> bool {
@@ -150,7 +186,7 @@ fn render_status_panel(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn window_range(total: usize, selected: usize, height: usize) -> (usize, usize) {
+pub fn window_range(total: usize, selected: usize, height: usize) -> (usize, usize) {
     if total == 0 || height == 0 {
         return (0, 0);
     }
@@ -823,160 +859,492 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+/// Clickable action categories available in the bottom footer status bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FooterAction {
+    Quit,
+    Help,
+    Push,
+    Pull,
+    Refresh,
+    FocusToggle,
+    CyclePanel,
+    StageToggle,
+    StageAll,
+    Commit,
+    Amend,
+    StashSave,
+    Discard,
+    ScrollDiff,
+    CheckoutBranch,
+    NewBranch,
+    DeleteBranch,
+    SwitchTab,
+    PopStash,
+    ApplyStash,
+    DropStash,
+    JumpStatus,
+    JumpFiles,
+    JumpBranches,
+    JumpCommits,
+    JumpStash,
+    ReturnToSidebar,
+    ScrollInspectorTop,
+    ScrollInspectorBottom,
+    PageInspectorDown,
+}
+
+/// Builds footer text spans and computes clickable bounding columns for footer actions.
+pub fn build_footer(app: &App, _width: u16) -> (Line<'static>, Vec<(u16, u16, FooterAction)>) {
     let mut footer_spans = Vec::new();
+    let mut buttons = Vec::new();
+    let mut col_offset: u16 = 0;
 
     // Feedback message or default badge
     if let Some(ref msg) = app.status_message {
+        let text = format!(" {} ", msg);
+        col_offset += text.len() as u16;
         footer_spans.push(Span::styled(
-            format!(" {} ", msg),
+            text,
             Style::default()
                 .fg(Color::Yellow)
                 .bg(Color::Rgb(40, 30, 20))
                 .add_modifier(Modifier::BOLD),
         ));
         footer_spans.push(Span::raw(" │ "));
+        col_offset += 3;
     } else {
+        let text = " [LazyOx] Ready ";
+        col_offset += text.len() as u16;
         footer_spans.push(Span::styled(
-            " [LazyOx] Ready ",
+            text,
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ));
         footer_spans.push(Span::raw(" │ "));
+        col_offset += 3;
     }
 
-    // Contextual action hints based on active panel or focused window
-    let panel_hints = if app.focused_window == FocusedWindow::Inspector {
-        vec![
-            Span::styled(
-                "j/k",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" (↑/↓) Scroll │ "),
-            Span::styled("PgDn/PgUp", Style::default().fg(Color::Cyan)),
-            Span::raw(" Page │ "),
-            Span::styled("g/G", Style::default().fg(Color::Yellow)),
-            Span::raw(" Top/Bottom │ "),
-            Span::styled(
-                "Esc/h",
-                Style::default()
-                    .fg(Color::LightRed)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" Return to Sidebar │ "),
-        ]
-    } else {
-        match app.active_panel {
-            Panel::Status => vec![
-                Span::styled(
-                    "1-5",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" Jump │ "),
-                Span::styled("Tab", Style::default().fg(Color::Cyan)),
-                Span::raw(" Cycle │ "),
-                Span::styled("h/l", Style::default().fg(Color::Cyan)),
-                Span::raw(" Window │ "),
-                Span::styled("r", Style::default().fg(Color::Green)),
-                Span::raw(" Refresh │ "),
-            ],
-            Panel::Files => vec![
-                Span::styled(
-                    "Space",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" Stage │ "),
-                Span::styled(
-                    "Enter/l",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" Scroll Diff │ "),
-                Span::styled("a", Style::default().fg(Color::Green)),
-                Span::raw(" All │ "),
-                Span::styled("c", Style::default().fg(Color::Cyan)),
-                Span::raw(" Commit │ "),
-                Span::styled("s", Style::default().fg(Color::Yellow)),
-                Span::raw(" Stash │ "),
-                Span::styled("d", Style::default().fg(Color::LightRed)),
-                Span::raw(" Discard │ "),
-                Span::styled("PgDn", Style::default().fg(Color::Cyan)),
-                Span::raw(" Scroll │ "),
-            ],
-            Panel::Branches => vec![
-                Span::styled(
-                    "Space/Enter",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" Checkout │ "),
-                Span::styled("l", Style::default().fg(Color::Cyan)),
-                Span::raw(" Diff │ "),
-                Span::styled("n", Style::default().fg(Color::Green)),
-                Span::raw(" New │ "),
-                Span::styled("d", Style::default().fg(Color::LightRed)),
-                Span::raw(" Delete │ "),
-                Span::styled("[/]", Style::default().fg(Color::Cyan)),
-                Span::raw(" Tabs │ "),
-            ],
-            Panel::Commits => vec![
-                Span::styled(
-                    "Enter/l",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" Scroll Diff │ "),
-                Span::styled("[/]", Style::default().fg(Color::Cyan)),
-                Span::raw(" Commits/Reflog │ "),
-                Span::styled("PgUp/PgDn", Style::default().fg(Color::Cyan)),
-                Span::raw(" Scroll │ "),
-            ],
-            Panel::Stash => vec![
-                Span::styled(
-                    "Space/Enter",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" Pop │ "),
-                Span::styled("l", Style::default().fg(Color::Cyan)),
-                Span::raw(" Diff │ "),
-                Span::styled("a", Style::default().fg(Color::Green)),
-                Span::raw(" Apply │ "),
-                Span::styled("d", Style::default().fg(Color::LightRed)),
-                Span::raw(" Drop │ "),
-            ],
-        }
+    let push_btn = |key: &'static str,
+                    key_style: Style,
+                    label: &'static str,
+                    label_style: Style,
+                    action: FooterAction,
+                    spans: &mut Vec<Span<'static>>,
+                    btns: &mut Vec<(u16, u16, FooterAction)>,
+                    offset: &mut u16| {
+        let start_x = *offset;
+        spans.push(Span::styled(key, key_style));
+        spans.push(Span::styled(label, label_style));
+        let btn_len = (key.len() + label.len()) as u16;
+        *offset += btn_len;
+        btns.push((start_x, *offset, action));
+        spans.push(Span::raw(" │ "));
+        *offset += 3;
     };
 
-    footer_spans.extend(panel_hints);
-    footer_spans.push(Span::styled(
-        "P",
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    ));
-    footer_spans.push(Span::raw(" Push │ "));
-    footer_spans.push(Span::styled("p", Style::default().fg(Color::Cyan)));
-    footer_spans.push(Span::raw(" Pull │ "));
-    footer_spans.push(Span::styled("?", Style::default().fg(Color::Yellow)));
-    footer_spans.push(Span::raw(" Help │ "));
-    footer_spans.push(Span::styled("q", Style::default().fg(Color::LightRed)));
-    footer_spans.push(Span::raw(" Quit"));
+    let bold_green = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD);
+    let bold_cyan = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let bold_yellow = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let bold_red = Style::default()
+        .fg(Color::LightRed)
+        .add_modifier(Modifier::BOLD);
+    let cyan = Style::default().fg(Color::Cyan);
+    let green = Style::default().fg(Color::Green);
+    let yellow = Style::default().fg(Color::Yellow);
+    let raw = Style::default();
 
-    let paragraph =
-        Paragraph::new(Line::from(footer_spans)).style(Style::default().bg(Color::Rgb(15, 18, 22)));
+    if app.focused_window == FocusedWindow::Inspector {
+        push_btn(
+            "j/k",
+            bold_green,
+            " (↑/↓) Scroll",
+            raw,
+            FooterAction::ScrollDiff,
+            &mut footer_spans,
+            &mut buttons,
+            &mut col_offset,
+        );
+        push_btn(
+            "PgDn/PgUp",
+            cyan,
+            " Page",
+            raw,
+            FooterAction::PageInspectorDown,
+            &mut footer_spans,
+            &mut buttons,
+            &mut col_offset,
+        );
+        push_btn(
+            "g/G",
+            yellow,
+            " Top/Bottom",
+            raw,
+            FooterAction::ScrollInspectorTop,
+            &mut footer_spans,
+            &mut buttons,
+            &mut col_offset,
+        );
+        push_btn(
+            "Esc/h",
+            bold_red,
+            " Return to Sidebar",
+            raw,
+            FooterAction::ReturnToSidebar,
+            &mut footer_spans,
+            &mut buttons,
+            &mut col_offset,
+        );
+    } else {
+        match app.active_panel {
+            Panel::Status => {
+                push_btn(
+                    "1-5",
+                    bold_cyan,
+                    " Jump",
+                    raw,
+                    FooterAction::CyclePanel,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "Tab",
+                    cyan,
+                    " Cycle",
+                    raw,
+                    FooterAction::CyclePanel,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "h/l",
+                    cyan,
+                    " Window",
+                    raw,
+                    FooterAction::FocusToggle,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "r",
+                    green,
+                    " Refresh",
+                    raw,
+                    FooterAction::Refresh,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+            }
+            Panel::Files => {
+                push_btn(
+                    "Space",
+                    bold_yellow,
+                    " Stage",
+                    raw,
+                    FooterAction::StageToggle,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "Enter/l",
+                    bold_cyan,
+                    " Scroll Diff",
+                    raw,
+                    FooterAction::ScrollDiff,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "a",
+                    green,
+                    " All",
+                    raw,
+                    FooterAction::StageAll,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "c",
+                    cyan,
+                    " Commit",
+                    raw,
+                    FooterAction::Commit,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "s",
+                    yellow,
+                    " Stash",
+                    raw,
+                    FooterAction::StashSave,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "d",
+                    bold_red,
+                    " Discard",
+                    raw,
+                    FooterAction::Discard,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "PgDn",
+                    cyan,
+                    " Scroll",
+                    raw,
+                    FooterAction::PageInspectorDown,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+            }
+            Panel::Branches => {
+                push_btn(
+                    "Space/Enter",
+                    bold_yellow,
+                    " Checkout",
+                    raw,
+                    FooterAction::CheckoutBranch,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "l",
+                    cyan,
+                    " Diff",
+                    raw,
+                    FooterAction::ScrollDiff,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "n",
+                    green,
+                    " New",
+                    raw,
+                    FooterAction::NewBranch,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "d",
+                    bold_red,
+                    " Delete",
+                    raw,
+                    FooterAction::DeleteBranch,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "[/]",
+                    cyan,
+                    " Tabs",
+                    raw,
+                    FooterAction::SwitchTab,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+            }
+            Panel::Commits => {
+                push_btn(
+                    "Enter/l",
+                    bold_cyan,
+                    " Scroll Diff",
+                    raw,
+                    FooterAction::ScrollDiff,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "[/]",
+                    cyan,
+                    " Commits/Reflog",
+                    raw,
+                    FooterAction::SwitchTab,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "PgUp/PgDn",
+                    cyan,
+                    " Scroll",
+                    raw,
+                    FooterAction::PageInspectorDown,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+            }
+            Panel::Stash => {
+                push_btn(
+                    "Space/Enter",
+                    bold_yellow,
+                    " Pop",
+                    raw,
+                    FooterAction::PopStash,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "l",
+                    cyan,
+                    " Diff",
+                    raw,
+                    FooterAction::ScrollDiff,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "a",
+                    green,
+                    " Apply",
+                    raw,
+                    FooterAction::ApplyStash,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "d",
+                    bold_red,
+                    " Drop",
+                    raw,
+                    FooterAction::DropStash,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+            }
+        }
+    }
+
+    // Global hints
+    push_btn(
+        "P",
+        bold_yellow,
+        " Push",
+        raw,
+        FooterAction::Push,
+        &mut footer_spans,
+        &mut buttons,
+        &mut col_offset,
+    );
+    push_btn(
+        "p",
+        cyan,
+        " Pull",
+        raw,
+        FooterAction::Pull,
+        &mut footer_spans,
+        &mut buttons,
+        &mut col_offset,
+    );
+    push_btn(
+        "?",
+        yellow,
+        " Help",
+        raw,
+        FooterAction::Help,
+        &mut footer_spans,
+        &mut buttons,
+        &mut col_offset,
+    );
+
+    // Quit (last item has no trailing separator)
+    let start_x = col_offset;
+    footer_spans.push(Span::styled("q", bold_red));
+    footer_spans.push(Span::raw(" Quit"));
+    let btn_len = ("q".len() + " Quit".len()) as u16;
+    col_offset += btn_len;
+    buttons.push((start_x, col_offset, FooterAction::Quit));
+
+    (Line::from(footer_spans), buttons)
+}
+
+fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let (line, _) = build_footer(app, area.width);
+    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::Rgb(15, 18, 22)));
     frame.render_widget(paragraph, area);
+}
+
+/// Computes the exact column bounds `(start_x, end_x)` for tabs in the Branches panel header.
+pub fn branch_tab_ranges(app: &App, area: Rect) -> Vec<(BranchesTab, u16, u16)> {
+    let title_prefix = " 3 Branches ";
+    let mut current_x = area.x + 1 + title_prefix.len() as u16;
+    let mut ranges = Vec::new();
+
+    let tabs = [
+        (BranchesTab::Local, "Local"),
+        (BranchesTab::Remotes, "Remotes"),
+        (BranchesTab::Tags, "Tags"),
+    ];
+
+    for (t, label) in tabs {
+        let label_len = if app.branches_tab == t {
+            format!("[ {} ]", label).len() as u16
+        } else {
+            format!(" {} ", label).len() as u16
+        };
+        let start_x = current_x;
+        let end_x = start_x + label_len;
+        ranges.push((t, start_x, end_x));
+        current_x = end_x + 1;
+    }
+    ranges
+}
+
+/// Computes the exact column bounds `(start_x, end_x)` for tabs in the Commits panel header.
+pub fn commit_tab_ranges(app: &App, area: Rect) -> Vec<(CommitsTab, u16, u16)> {
+    let title_prefix = " 4 Commits ";
+    let mut current_x = area.x + 1 + title_prefix.len() as u16;
+    let mut ranges = Vec::new();
+
+    let tabs = [
+        (CommitsTab::Commits, "Commits"),
+        (CommitsTab::Reflog, "Reflog"),
+    ];
+
+    for (t, label) in tabs {
+        let label_len = if app.commits_tab == t {
+            format!("[ {} ]", label).len() as u16
+        } else {
+            format!(" {} ", label).len() as u16
+        };
+        let start_x = current_x;
+        let end_x = start_x + label_len;
+        ranges.push((t, start_x, end_x));
+        current_x = end_x + 1;
+    }
+    ranges
 }
 
 fn render_modals(frame: &mut Frame, app: &App) {
@@ -1321,7 +1689,7 @@ fn render_modals(frame: &mut Frame, app: &App) {
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1339,4 +1707,68 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+/// Computes the bounding rectangle for an active modal popup.
+pub fn compute_modal_rect(modal: &ActiveModal, screen: Rect) -> Option<Rect> {
+    match modal {
+        ActiveModal::None => None,
+        ActiveModal::CommitPrompt { .. } | ActiveModal::CommitAmend { .. } => {
+            Some(centered_rect(65, 30, screen))
+        }
+        ActiveModal::BranchCreate { .. } | ActiveModal::StashSave { .. } => {
+            Some(centered_rect(60, 25, screen))
+        }
+        ActiveModal::Help => Some(centered_rect(72, 80, screen)),
+    }
+}
+
+/// Structured sub-regions of an active modal dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModalLayout {
+    pub area: Rect,
+    pub input_rect: Option<Rect>,
+    pub action_rect: Option<Rect>,
+}
+
+/// Computes inner input and action sub-rectangles for an active modal dialog.
+pub fn compute_modal_layout(modal: &ActiveModal, screen: Rect) -> Option<ModalLayout> {
+    let area = compute_modal_rect(modal, screen)?;
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(area);
+
+    match modal {
+        ActiveModal::CommitPrompt { .. } | ActiveModal::CommitAmend { .. } => {
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                ])
+                .split(inner);
+            Some(ModalLayout {
+                area,
+                input_rect: Some(v_chunks[1]),
+                action_rect: Some(v_chunks[2]),
+            })
+        }
+        ActiveModal::BranchCreate { .. } | ActiveModal::StashSave { .. } => {
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(inner);
+            Some(ModalLayout {
+                area,
+                input_rect: Some(v_chunks[1]),
+                action_rect: None,
+            })
+        }
+        ActiveModal::Help => Some(ModalLayout {
+            area,
+            input_rect: None,
+            action_rect: None,
+        }),
+        ActiveModal::None => None,
+    }
 }

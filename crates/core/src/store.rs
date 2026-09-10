@@ -623,6 +623,7 @@ mod tests {
 
         let ctx = RepoContext::discover(&sub_dir).unwrap();
         assert!(!ctx.is_bare);
+        let repo_root = strip_verbatim_prefix(&repo_root.canonicalize().unwrap());
         assert_eq!(ctx.worktree.unwrap(), repo_root);
         assert_eq!(ctx.git_dir, repo_root.join(".git"));
         assert_eq!(ctx.common_dir, repo_root.join(".git"));
@@ -652,6 +653,9 @@ mod tests {
 
         let ctx = RepoContext::discover(&worktree_dir).unwrap();
         assert!(!ctx.is_bare);
+        let worktree_dir = strip_verbatim_prefix(&worktree_dir.canonicalize().unwrap());
+        let wt_gitdir = strip_verbatim_prefix(&wt_gitdir.canonicalize().unwrap());
+        let main_git = strip_verbatim_prefix(&main_git.canonicalize().unwrap());
         assert_eq!(ctx.worktree.unwrap(), worktree_dir);
         assert_eq!(ctx.git_dir, wt_gitdir);
         assert_eq!(ctx.common_dir, main_git);
@@ -668,6 +672,7 @@ mod tests {
         let ctx = RepoContext::discover(&bare_dir).unwrap();
         assert!(ctx.is_bare);
         assert!(ctx.worktree.is_none());
+        let bare_dir = strip_verbatim_prefix(&bare_dir.canonicalize().unwrap());
         assert_eq!(ctx.git_dir, bare_dir);
         assert_eq!(ctx.common_dir, bare_dir);
     }

@@ -1204,6 +1204,7 @@ fn cmd_add(files: Vec<String>) -> Result<()> {
     files_to_stage.dedup();
 
     // Map existing modes so we preserve permissions (such as 100755) when updating on Windows
+    #[cfg(not(unix))]
     let existing_modes: std::collections::HashMap<String, u32> = index
         .entries()
         .iter()
@@ -1226,6 +1227,7 @@ fn cmd_add(files: Vec<String>) -> Result<()> {
             let oid = store.write_object(&blob)?;
 
             let meta = std::fs::metadata(target)?;
+            #[allow(unused_mut)]
             let mut entry = IndexEntry::from_fs_metadata(rel_path.clone(), oid, &meta, 0);
             #[cfg(not(unix))]
             if let Some(&old_mode) = existing_modes.get(&rel_path) {

@@ -550,6 +550,73 @@ impl App {
         self.select_panel(self.active_panel.prev());
     }
 
+    /// Selects a specific file item by index and refreshes the inspector.
+    pub fn select_file_index(&mut self, idx: usize) {
+        if idx < self.files.len() {
+            self.files_selected = idx;
+            self.inspector_scroll = 0;
+            self.update_inspector();
+        }
+    }
+
+    /// Selects a specific branch/remote/tag item by index and refreshes the inspector.
+    pub fn select_branch_index(&mut self, idx: usize) {
+        match self.branches_tab {
+            BranchesTab::Local => {
+                let local_count = self.branches.iter().filter(|b| !b.is_remote).count();
+                if idx < local_count {
+                    self.branches_selected = idx;
+                    self.inspector_scroll = 0;
+                    self.update_inspector();
+                }
+            }
+            BranchesTab::Remotes => {
+                if idx < self.remotes.len() {
+                    self.remotes_selected = idx;
+                    self.inspector_scroll = 0;
+                    self.update_inspector();
+                }
+            }
+            BranchesTab::Tags => {
+                if idx < self.tags.len() {
+                    self.tags_selected = idx;
+                    self.inspector_scroll = 0;
+                    self.update_inspector();
+                }
+            }
+        }
+    }
+
+    /// Selects a specific commit or reflog item by index and refreshes the inspector.
+    pub fn select_commit_index(&mut self, idx: usize) {
+        match self.commits_tab {
+            CommitsTab::Commits => {
+                if idx < self.commits.len() {
+                    self.commits_selected = idx;
+                    self.selected_index = idx;
+                    self.inspector_scroll = 0;
+                    self.update_inspector();
+                }
+            }
+            CommitsTab::Reflog => {
+                if idx < self.reflog.len() {
+                    self.reflog_selected = idx;
+                    self.inspector_scroll = 0;
+                    self.update_inspector();
+                }
+            }
+        }
+    }
+
+    /// Selects a specific stash item by index and refreshes the inspector.
+    pub fn select_stash_index(&mut self, idx: usize) {
+        if idx < self.stashes.len() {
+            self.stashes_selected = idx;
+            self.inspector_scroll = 0;
+            self.update_inspector();
+        }
+    }
+
     /// Moves selection down within the currently active panel or scrolls inspector.
     pub fn next_item(&mut self) {
         if self.focused_window == FocusedWindow::Inspector {
@@ -1601,6 +1668,33 @@ impl App {
                 ref mut cursor,
             } => {
                 advance(name, cursor);
+            }
+            _ => {}
+        }
+    }
+
+    /// Sets the cursor position in an active modal text field, clamped to the character length.
+    pub fn set_modal_cursor(&mut self, pos: usize) {
+        match self.active_modal {
+            ActiveModal::CommitPrompt {
+                ref message,
+                ref mut cursor,
+            }
+            | ActiveModal::CommitAmend {
+                ref message,
+                ref mut cursor,
+            }
+            | ActiveModal::StashSave {
+                ref message,
+                ref mut cursor,
+            } => {
+                *cursor = pos.min(message.chars().count());
+            }
+            ActiveModal::BranchCreate {
+                ref name,
+                ref mut cursor,
+            } => {
+                *cursor = pos.min(name.chars().count());
             }
             _ => {}
         }
