@@ -910,6 +910,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "crossterm",
+ "oxidize-config",
  "oxidize-core",
  "oxidize-diff",
  "oxidize-index",
