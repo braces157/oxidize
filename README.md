@@ -16,8 +16,8 @@
 ---
 
 [![CI Status](https://github.com/braces157/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/braces157/oxidize/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/badge/crates.io-v0.1.0-orange.svg?logo=rust)](https://crates.io)
-[![Docs.rs](https://img.shields.io/badge/docs.rs-ox-blue.svg?logo=docs.rs)](https://docs.rs)
+[![Version](https://img.shields.io/badge/version-v0.1.0-orange.svg?logo=rust)](https://github.com/braces157/oxidize/releases)
+[![Docs](https://img.shields.io/badge/docs-reference-blue.svg?logo=read-the-docs)](https://github.com/braces157/oxidize#readme)
 [![Rust Version](https://img.shields.io/badge/rustc-1.80+-blue.svg?logo=rust)](https://www.rust-lang.org)
 [![Git Parity](https://img.shields.io/badge/git%20parity-100%25%20byte--compatible-blueviolet.svg?logo=git)](https://git-scm.com)
 [![Differential Tests](https://img.shields.io/badge/tests-36%2F36%20passed-brightgreen.svg)](#-differential-testing--correctness)
@@ -175,26 +175,25 @@ ox ui
 - **Rust Toolchain**: 1.80 or later (`rustup update stable`)
 - **Git** (optional, recommended for differential validation)
 
-### Option A: Install via Cargo
+### Option A: Install via Cargo (from Git)
 ```bash
-# Install directly from crates.io
-cargo install ox
+cargo install --git https://github.com/braces157/oxidize.git
 
 # Verify installation
 ox --version
 ```
 
-### Option B: Build from Source
+### Option B: Build & Install from Source
 ```bash
 # Clone the repository
 git clone https://github.com/braces157/oxidize.git
 cd oxidize
 
-# Build optimized release binary
-cargo build --release
+# Install into cargo bin directory
+cargo install --path crates/cli --force
 
-# Symlink or copy to PATH
-cp target/release/ox ~/.cargo/bin/
+# Or build release binary directly
+cargo build --release
 ```
 
 ### Shell Completions
