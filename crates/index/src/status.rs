@@ -126,16 +126,13 @@ pub fn compute_status_with_ignore(
             status.unstaged.push(UnstagedChange::Deleted(path.clone()));
         } else if let Ok(meta) = fs::metadata(&full_path) {
             let size = meta.len() as u32;
-            if size != entry.file_size {
-                status.unstaged.push(UnstagedChange::Modified(path.clone()));
-            } else {
-                // Size matches, check if content hash matches
-                if let Ok(data) = fs::read(&full_path) {
-                    let blob = Object::Blob(oxidize_core::object::Blob::new(data));
-                    if blob.id() != entry.oid {
-                        status.unstaged.push(UnstagedChange::Modified(path.clone()));
-                    }
+            if let Ok(data) = fs::read(&full_path) {
+                let blob = Object::Blob(oxidize_core::object::Blob::new(data));
+                if blob.id() != entry.oid {
+                    status.unstaged.push(UnstagedChange::Modified(path.clone()));
                 }
+            } else if size != entry.file_size {
+                status.unstaged.push(UnstagedChange::Modified(path.clone()));
             }
         }
     }

@@ -849,7 +849,7 @@ fn cmd_mktree() -> Result<()> {
 
 fn get_head_info(
     git_dir: &Path,
-    store: &LooseObjectStore,
+    store: &impl oxidize_core::store::ObjectReader,
 ) -> Result<(String, Option<ObjectId>, Option<ObjectId>)> {
     let head_path = git_dir.join("HEAD");
     if !head_path.exists() {
@@ -981,7 +981,7 @@ fn collect_files_to_add(
 fn cmd_status() -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
     let repo_root = git_dir.parent().context("git_dir has no parent")?;
-    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let store = RepoObjectStore::open(&git_dir)?;
     let index_path = git_dir.join("index");
     let index = Index::load_from(&index_path)?;
     let gitignore = GitIgnore::load_from_dir(repo_root).unwrap_or_default();
@@ -2625,26 +2625,29 @@ fn cmd_restore(staged: bool, files: Vec<String>) -> Result<()> {
             .replace('\\', "/");
 
         if staged {
-            if let Some((mode, head_oid)) = head_tree_map.get(&rel_path) {
+            if let Some((_mode, head_oid)) = head_tree_map.get(&rel_path) {
                 let full_path = repo_root.join(&rel_path);
-                let meta = std::fs::metadata(&full_path).ok();
-                let file_size = meta.as_ref().map(|m| m.len() as u32).unwrap_or(0);
-                index.add_entry(IndexEntry {
-                    ctime_sec: 0,
-                    ctime_nsec: 0,
-                    mtime_sec: 0,
-                    mtime_nsec: 0,
-                    dev: 0,
-                    ino: 0,
-                    mode: mode.0,
-                    uid: 0,
-                    gid: 0,
-                    file_size,
-                    oid: *head_oid,
-                    stage: 0,
-                    assume_valid: false,
-                    path: rel_path,
-                });
+                if let Ok(meta) = std::fs::metadata(&full_path) {
+                    index.add_entry(IndexEntry::from_fs_metadata(rel_path, *head_oid, &meta, 0));
+                } else {
+                    let (_, raw_bytes) = store.read_raw(head_oid)?;
+                    index.add_entry(IndexEntry {
+                        ctime_sec: 0,
+                        ctime_nsec: 0,
+                        mtime_sec: 0,
+                        mtime_nsec: 0,
+                        dev: 0,
+                        ino: 0,
+                        mode: 0o100644,
+                        uid: 0,
+                        gid: 0,
+                        file_size: raw_bytes.len() as u32,
+                        oid: *head_oid,
+                        stage: 0,
+                        assume_valid: false,
+                        path: rel_path,
+                    });
+                }
             } else {
                 index.remove_entry(&rel_path);
             }
@@ -2665,7 +2668,10 @@ fn cmd_restore(staged: bool, files: Vec<String>) -> Result<()> {
             if let Some(parent) = full_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&full_path, data)?;
+            std::fs::write(&full_path, &data)?;
+            if let Ok(meta) = std::fs::metadata(&full_path) {
+                index.add_entry(IndexEntry::from_fs_metadata(rel_path, entry.oid, &meta, 0));
+            }
         }
     }
 

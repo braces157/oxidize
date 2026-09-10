@@ -120,8 +120,14 @@ impl Index {
     }
 
     /// Adds or updates an entry in the index, maintaining canonical ordering.
+    /// Adding a stage 0 entry removes any unmerged stage entries (1, 2, 3) for that path.
     pub fn add_entry(&mut self, entry: IndexEntry) {
-        if let Some(pos) = self
+        if entry.stage == 0 {
+            self.entries.retain(|e| e.path != entry.path);
+            self.entries.push(entry);
+            self.entries
+                .sort_by(|a, b| a.path.cmp(&b.path).then(a.stage.cmp(&b.stage)));
+        } else if let Some(pos) = self
             .entries
             .iter()
             .position(|e| e.path == entry.path && e.stage == entry.stage)
