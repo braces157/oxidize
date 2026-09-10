@@ -5,10 +5,13 @@ use crate::model::{
 };
 use crate::ops;
 use crate::TuiError;
+use oxidize_config::GitIgnore;
 use oxidize_core::id::ObjectId;
 use oxidize_core::object::Object;
 use oxidize_diff::format_unified_diff;
-use oxidize_index::{compute_status, flatten_tree, Index, StagedChange, UnstagedChange};
+use oxidize_index::{
+    compute_status_with_ignore, flatten_tree, Index, StagedChange, UnstagedChange,
+};
 use oxidize_pack::RepoObjectStore;
 use oxidize_refs::RefStore;
 use std::collections::{BTreeMap, HashSet, VecDeque};
@@ -210,7 +213,14 @@ impl App {
             }
         });
 
-        if let Ok(status) = compute_status(&self.repo_root, &index, head_tree.as_ref(), &store) {
+        let gitignore = GitIgnore::load_from_dir(&self.repo_root).unwrap_or_default();
+        if let Ok(status) = compute_status_with_ignore(
+            &self.repo_root,
+            &index,
+            head_tree.as_ref(),
+            &store,
+            Some(&|p, is_dir| gitignore.is_ignored(p, is_dir)),
+        ) {
             for staged in &status.staged {
                 match staged {
                     StagedChange::New(p) => self.files.push(FileItem {
