@@ -59,7 +59,7 @@ impl Index {
         }
 
         let version = cursor.read_u32::<BigEndian>()?;
-        if version != 2 && version != 3 {
+        if version != 2 && version != 3 && version != 4 {
             return Err(IndexError::UnsupportedVersion(version));
         }
 
@@ -67,9 +67,18 @@ impl Index {
         let mut entries = Vec::with_capacity(num_entries);
 
         // 2. Entries
-        for _ in 0..num_entries {
-            let entry = IndexEntry::read_from(&mut cursor)?;
-            entries.push(entry);
+        if version == 4 {
+            let mut prev_path = String::new();
+            for _ in 0..num_entries {
+                let entry = IndexEntry::read_v4_entry(&mut cursor, &prev_path)?;
+                prev_path = entry.path.clone();
+                entries.push(entry);
+            }
+        } else {
+            for _ in 0..num_entries {
+                let entry = IndexEntry::read_from(&mut cursor)?;
+                entries.push(entry);
+            }
         }
 
         // Optional extensions (we ignore them safely while advancing cursor)
@@ -160,5 +169,75 @@ impl Index {
     /// Returns a slice of all staged entries.
     pub fn entries(&self) -> &[IndexEntry] {
         &self.entries
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxidize_core::object::Object;
+
+    #[test]
+    fn test_index_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let index_path = temp_dir.path().join("index");
+
+        let mut index = Index::new();
+        index.add_entry(IndexEntry {
+            ctime_sec: 100,
+            ctime_nsec: 200,
+            mtime_sec: 300,
+            mtime_nsec: 400,
+            dev: 1,
+            ino: 2,
+            mode: 0o100644,
+            uid: 1000,
+            gid: 1000,
+            file_size: 12,
+            oid: Object::Blob(oxidize_core::object::Blob::new(b"hello world\n".to_vec())).id(),
+            stage: 0,
+            assume_valid: false,
+            path: "hello.txt".to_string(),
+        });
+
+        index.write_to(&index_path).unwrap();
+        let loaded = Index::load_from(&index_path).unwrap();
+        assert_eq!(loaded.version, 2);
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].path, "hello.txt");
+    }
+
+    #[test]
+    fn test_index_v4_loading() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_path = temp_dir.path();
+
+        let status = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_path)
+            .status();
+        if status.is_err() || !status.unwrap().success() {
+            return;
+        }
+
+        std::fs::write(repo_path.join("file1.txt"), "first").unwrap();
+        std::fs::write(repo_path.join("file2.txt"), "second").unwrap();
+
+        let _ = std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .status();
+
+        let _ = std::process::Command::new("git")
+            .args(["update-index", "--index-version", "4"])
+            .current_dir(repo_path)
+            .status();
+
+        let index_path = repo_path.join(".git").join("index");
+        let loaded = Index::load_from(&index_path).unwrap();
+        assert_eq!(loaded.version, 4);
+        assert_eq!(loaded.entries.len(), 2);
+        assert_eq!(loaded.entries[0].path, "file1.txt");
+        assert_eq!(loaded.entries[1].path, "file2.txt");
     }
 }

@@ -164,5 +164,42 @@ This document records the architectural, design, and protocol decisions made dur
   - Hardened `LooseObjectStore::write_object` for thread safety: unique temporary files using nanosecond timestamps (`<oid>.<nanos>.tmp`) prevent race conditions during concurrent object creation, and benign rename collisions (identical content hashed simultaneously) are handled safely.
   - In `cmd_add`, candidate files are discovered during directory traversal, sorted and deduplicated, then read, hashed, written to the loose object store, and converted to `IndexEntry` structs in parallel via Rayon. The resulting entries are sequentially inserted into the index and written to disk atomically.
 
+## Phase 10: Scope Boundary Extensions & Git Parity
+
+### DECISION 023: Command Alias Expansion & INI Config Subcommands
+- **Date**: 2026-09-10
+- **Context**: Real-world developers rely heavily on built-in Git shorthand aliases (`st`, `co`, `ci`, `br`, `df`, `rb`, `cp`) and custom user-defined shortcuts defined in `.git/config` and `~/.gitconfig` under the `[alias]` section (e.g. `lg = log --oneline --graph`).
+- **Decision**:
+  - Implemented `expand_aliases` in `crates/cli/src/main.rs` before Clap CLI argument parsing.
+  - Checks local `.git/config` and global `~/.gitconfig` `[alias]` sections via `GitConfig::get_alias`.
+  - Falls back to built-in shorthand defaults (`st` -> `status`, `co` -> `checkout`, `ci` -> `commit`, `br` -> `branch`, `df` -> `diff`, `rb` -> `rebase`, `cp` -> `cherry-pick`).
+  - Added quotes-aware command tokenizer (`tokenize_command`) to split multi-parameter command strings accurately.
+
+### DECISION 024: 100% Exact Rename Detection in Status and Diff
+- **Date**: 2026-09-10
+- **Context**: When a tracked file is moved or renamed, Git groups the staged deletion and addition together as `renamed: <from> -> <to>` in `git status` and outputs unified diff rename headers (`similarity index 100%`, `rename from <from>`, `rename to <to>`) in `git diff --staged`.
+- **Decision**:
+  - Extended `StagedChange` enum in `oxidize-index` with `Renamed { from: String, to: String }`.
+  - In `compute_status_with_ignore`, compare newly staged index entries against deleted HEAD tree entries. When `head_oid == new_oid`, pair them into a `Renamed` change rather than independent addition and deletion.
+  - In `cmd_status`, formatted as `\trenamed:    <from> -> <to>`.
+  - In `cmd_diff(staged = true)`, detect matching OIDs across files to synthesize Git-compatible rename headers without extraneous body diffs.
+
+### DECISION 025: Native SSH Transport Client via System `ssh`
+- **Date**: 2026-09-10
+- **Context**: Daily-driver usage requires cloning, fetching, and pushing over SSH (`git@github.com:org/repo.git` and `ssh://user@host:port/path`).
+- **Decision**:
+  - Created `oxidize_transport::ssh` module with `is_ssh_url`, `parse_ssh_url`, and `SshClient`.
+  - Automatically resolves SSH binary from `GIT_SSH_COMMAND`, `GIT_SSH`, system `PATH`, or standard Windows Git fallback paths (`C:\Program Files\Git\usr\bin\ssh.exe`).
+  - Executes remote `git-upload-pack` and `git-receive-pack` commands over SSH stdin/stdout using Git's native `pkt-line` framing and sideband demultiplexing.
+  - Wired into `ox clone`, `ox fetch`, `ox pull`, and `ox push`.
+
+### DECISION 026: Git Index Version 4 Format Reader Support
+- **Date**: 2026-09-10
+- **Context**: Git version 4 index files (`DIRC` version 4) use run-length path prefix compression (varint byte-strip count from previous path + suffix string) and omit 8-byte alignment padding to save 30-50% disk space.
+- **Decision**:
+  - Added `read_v4_entry` to `IndexEntry` in `oxidize-index` to decode varint strip counts and reconstruct paths from preceding entries without padding.
+  - Updated `Index::load_from` to accept version 4 index files alongside version 2 and 3, ensuring full interoperability with Git repositories configured with `index.version = 4`.
+
+
 
 

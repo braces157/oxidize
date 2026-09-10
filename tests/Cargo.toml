@@ -41,6 +41,10 @@ path = "advanced_porcelain_test.rs"
 name = "performance_benchmark_test"
 path = "performance_benchmark_test.rs"
 
+[[test]]
+name = "scope_boundaries_test"
+path = "scope_boundaries_test.rs"
+
 [dev-dependencies]
 oxidize-core.workspace = true
 oxidize-index.workspace = true

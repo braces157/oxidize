@@ -20,6 +20,13 @@ pub enum StagedChange {
     Modified(String),
     /// Deleted file staged.
     Deleted(String),
+    /// Renamed file staged.
+    Renamed {
+        /// Previous path in HEAD.
+        from: String,
+        /// New path in index.
+        to: String,
+    },
 }
 
 /// Status category of a file in the working tree (working tree vs index).
@@ -100,26 +107,76 @@ pub fn compute_status_with_ignore(
         .map(|e| (e.path.clone(), e))
         .collect();
 
-    // Staged changes: compare index with HEAD
+    // Collect candidates for staged changes
+    let mut staged_new: Vec<(String, ObjectId)> = Vec::new();
+    let mut staged_modified: Vec<String> = Vec::new();
+    let mut staged_deleted: Vec<(String, ObjectId)> = Vec::new();
+
     for (path, entry) in &index_map {
         match head_entries.get(path) {
             None => {
-                status.staged.push(StagedChange::New(path.clone()));
+                staged_new.push((path.clone(), entry.oid));
             }
             Some((_mode, head_oid)) => {
                 if &entry.oid != head_oid {
-                    status.staged.push(StagedChange::Modified(path.clone()));
+                    staged_modified.push(path.clone());
                 }
             }
         }
     }
 
-    // Staged deletions: in HEAD but missing in index
-    for path in head_entries.keys() {
+    for (path, (_mode, head_oid)) in &head_entries {
         if !index_map.contains_key(path) {
-            status.staged.push(StagedChange::Deleted(path.clone()));
+            staged_deleted.push((path.clone(), *head_oid));
         }
     }
+
+    // Exact rename detection: match identical ObjectIds between staged_deleted and staged_new
+    let mut matched_deleted = std::collections::HashSet::new();
+    let mut matched_new = std::collections::HashSet::new();
+
+    for (new_idx, (new_path, new_oid)) in staged_new.iter().enumerate() {
+        if let Some((del_idx, (del_path, _))) = staged_deleted
+            .iter()
+            .enumerate()
+            .find(|(i, (_del_path, del_oid))| !matched_deleted.contains(i) && del_oid == new_oid)
+        {
+            matched_deleted.insert(del_idx);
+            matched_new.insert(new_idx);
+            status.staged.push(StagedChange::Renamed {
+                from: del_path.clone(),
+                to: new_path.clone(),
+            });
+        }
+    }
+
+    for path in staged_modified {
+        status.staged.push(StagedChange::Modified(path));
+    }
+
+    for (idx, (path, _)) in staged_new.into_iter().enumerate() {
+        if !matched_new.contains(&idx) {
+            status.staged.push(StagedChange::New(path));
+        }
+    }
+
+    for (idx, (path, _)) in staged_deleted.into_iter().enumerate() {
+        if !matched_deleted.contains(&idx) {
+            status.staged.push(StagedChange::Deleted(path));
+        }
+    }
+
+    status.staged.sort_by(|a, b| {
+        let path_a = match a {
+            StagedChange::New(p) | StagedChange::Modified(p) | StagedChange::Deleted(p) => p,
+            StagedChange::Renamed { to, .. } => to,
+        };
+        let path_b = match b {
+            StagedChange::New(p) | StagedChange::Modified(p) | StagedChange::Deleted(p) => p,
+            StagedChange::Renamed { to, .. } => to,
+        };
+        path_a.cmp(path_b)
+    });
 
     // 2. Unstaged changes: compare working tree with index in parallel with Rayon
     let mut unstaged: Vec<UnstagedChange> = index
@@ -252,4 +309,62 @@ fn scan_untracked(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxidize_core::object::{Blob, Tree, TreeEntry};
+    use oxidize_core::store::LooseObjectStore;
+
+    #[test]
+    fn test_status_rename_detection() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_root = temp_dir.path();
+        let objects_dir = repo_root.join(".git").join("objects");
+        let store = LooseObjectStore::new(&objects_dir);
+
+        // Create blob for "content"
+        let blob = Blob::new(b"hello world".to_vec());
+        let blob_id = store.write_object(&Object::Blob(blob)).unwrap();
+
+        // Create HEAD tree containing "old_name.txt"
+        let tree = Tree::new(vec![TreeEntry {
+            mode: FileMode::REGULAR,
+            name: "old_name.txt".to_string(),
+            id: blob_id,
+        }]);
+        let tree_id = store.write_object(&Object::Tree(tree)).unwrap();
+
+        // Create index containing "new_name.txt" with the same blob_id
+        let mut index = Index::new();
+        index.add_entry(crate::entry::IndexEntry {
+            ctime_sec: 100,
+            ctime_nsec: 100,
+            mtime_sec: 100,
+            mtime_nsec: 100,
+            dev: 0,
+            ino: 0,
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            file_size: 11,
+            oid: blob_id,
+            stage: 0,
+            assume_valid: false,
+            path: "new_name.txt".to_string(),
+        });
+
+        // Write file on disk so it's not detected as unstaged deleted
+        std::fs::write(repo_root.join("new_name.txt"), b"hello world").unwrap();
+
+        let status = compute_status(repo_root, &index, Some(&tree_id), &store).unwrap();
+        assert_eq!(
+            status.staged,
+            vec![StagedChange::Renamed {
+                from: "old_name.txt".to_string(),
+                to: "new_name.txt".to_string(),
+            }]
+        );
+    }
 }

@@ -29,6 +29,11 @@ impl PktLine {
     pub fn to_text(&self) -> Option<&str> {
         self.as_str().map(|s| s.trim_end_matches(['\r', '\n']))
     }
+
+    /// Checks if this is a Flush packet (`0000`).
+    pub fn is_flush(&self) -> bool {
+        matches!(self, Self::Flush)
+    }
 }
 
 /// Formats a byte slice as a Git pkt-line with a 4-byte hex prefix.
@@ -95,6 +100,39 @@ pub fn parse_pkt_line(input: &[u8]) -> Result<Option<(PktLine, usize)>, Transpor
 
     let payload = input[4..len].to_vec();
     Ok(Some((PktLine::Data(payload), len)))
+}
+
+/// Reads a single packet line directly from a reader.
+pub fn read_single_pkt_line<R: Read>(reader: &mut R) -> Result<PktLine, TransportError> {
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf)?;
+    let hex_str = std::str::from_utf8(&len_buf)
+        .map_err(|e| TransportError::PktLineError(format!("invalid hex length utf8: {}", e)))?;
+
+    if hex_str == "0000" {
+        return Ok(PktLine::Flush);
+    }
+    if hex_str == "0001" {
+        return Ok(PktLine::Delim);
+    }
+    if hex_str == "0002" {
+        return Ok(PktLine::ResponseEnd);
+    }
+
+    let len = usize::from_str_radix(hex_str, 16).map_err(|e| {
+        TransportError::PktLineError(format!("invalid hex length '{}': {}", hex_str, e))
+    })?;
+
+    if len < 4 {
+        return Err(TransportError::PktLineError(format!(
+            "invalid packet length {}",
+            len
+        )));
+    }
+
+    let mut payload = vec![0u8; len - 4];
+    reader.read_exact(&mut payload)?;
+    Ok(PktLine::Data(payload))
 }
 
 /// Reads all packet lines until EOF from a reader.

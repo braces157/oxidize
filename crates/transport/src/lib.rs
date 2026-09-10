@@ -38,13 +38,15 @@ pub mod client;
 pub mod local;
 pub mod pkt_line;
 pub mod protocol;
+pub mod ssh;
 
 pub use client::SmartHttpClient;
 pub use local::{discover_local_refs, fetch_local_pack, resolve_local_path};
 pub use pkt_line::{
-    encode_flush, encode_pkt_line, encode_pkt_line_str, parse_pkt_line, read_pkt_lines, PktLine,
-    SidebandDemuxer,
+    encode_flush, encode_pkt_line, encode_pkt_line_str, parse_pkt_line, read_pkt_lines,
+    read_single_pkt_line, PktLine, SidebandDemuxer,
 };
 pub use protocol::{
     build_receive_pack_request, build_upload_pack_request, parse_ref_advertisement, RemoteRef,
 };
+pub use ssh::{find_ssh_binary, is_ssh_url, parse_ssh_url, SshClient, SshEndpoint};

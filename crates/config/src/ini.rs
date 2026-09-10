@@ -100,6 +100,29 @@ impl GitConfig {
             .and_then(|entries| entries.get(&key.to_lowercase()).map(|s| s.as_str()))
     }
 
+    /// Returns a reference to all key-value entries in a section.
+    pub fn get_section(
+        &self,
+        section: &str,
+        subsection: Option<&str>,
+    ) -> Option<&BTreeMap<String, String>> {
+        let sec_key = ConfigSectionKey {
+            section: section.to_lowercase(),
+            subsection: subsection.map(|s| s.to_string()),
+        };
+        self.sections.get(&sec_key)
+    }
+
+    /// Returns all configured aliases as a map of `alias_name -> command_string`.
+    pub fn get_aliases(&self) -> BTreeMap<String, String> {
+        self.get_section("alias", None).cloned().unwrap_or_default()
+    }
+
+    /// Retrieves the command string for a named alias if defined.
+    pub fn get_alias(&self, name: &str) -> Option<&str> {
+        self.get("alias", None, name)
+    }
+
     /// Sets a value for the specified section, subsection, and key.
     pub fn set(&mut self, section: &str, subsection: Option<&str>, key: &str, value: &str) {
         let sec_key = ConfigSectionKey {
@@ -223,5 +246,22 @@ mod tests {
 
         let serialized = config.serialize();
         assert!(serialized.contains("[remote \"upstream\"]"));
+    }
+
+    #[test]
+    fn test_git_config_aliases() {
+        let sample = r#"
+[alias]
+	st = status
+	ci = commit
+	lg = log --oneline --graph
+"#;
+        let config = GitConfig::parse_str(sample).unwrap();
+        assert_eq!(config.get_alias("st"), Some("status"));
+        assert_eq!(config.get_alias("lg"), Some("log --oneline --graph"));
+        assert_eq!(config.get_alias("unknown"), None);
+        let aliases = config.get_aliases();
+        assert_eq!(aliases.len(), 3);
+        assert_eq!(aliases.get("ci").map(|s| s.as_str()), Some("commit"));
     }
 }

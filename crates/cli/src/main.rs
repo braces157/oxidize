@@ -19,7 +19,8 @@ use oxidize_pack::{
 };
 use oxidize_refs::{get_default_signature, RefStore};
 use oxidize_transport::{
-    discover_local_refs, fetch_local_pack, resolve_local_path, SmartHttpClient,
+    discover_local_refs, fetch_local_pack, is_ssh_url, resolve_local_path, SmartHttpClient,
+    SshClient,
 };
 use sha1::{Digest, Sha1};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
@@ -496,7 +497,9 @@ enum RemoteCommand {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let raw_args: Vec<String> = std::env::args().collect();
+    let expanded_args = expand_aliases(raw_args);
+    let cli = Cli::parse_from(expanded_args);
 
     match cli.command {
         Some(cmd) => dispatch_command(cmd)?,
@@ -507,6 +510,99 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn expand_aliases(raw_args: Vec<String>) -> Vec<String> {
+    if raw_args.len() <= 1 {
+        return raw_args;
+    }
+
+    let subcmd = &raw_args[1];
+    if subcmd.starts_with('-') {
+        return raw_args;
+    }
+
+    // Built-in standard Git aliases
+    let builtin_expansion = match subcmd.as_str() {
+        "st" => Some("status"),
+        "co" => Some("checkout"),
+        "ci" => Some("commit"),
+        "br" => Some("branch"),
+        "df" => Some("diff"),
+        "rb" => Some("rebase"),
+        "cp" => Some("cherry-pick"),
+        _ => None,
+    };
+
+    // Config aliases: check local repository .git/config then global ~/.gitconfig
+    let mut config_alias: Option<String> = None;
+    if let Ok(git_dir) = find_git_dir(Path::new(".")) {
+        let config_path = git_dir.join("config");
+        if let Ok(config) = GitConfig::load_from_file(config_path) {
+            if let Some(cmd) = config.get_alias(subcmd) {
+                config_alias = Some(cmd.to_string());
+            }
+        }
+    }
+
+    if config_alias.is_none() {
+        if let Some(home) = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+        {
+            let global_path = home.join(".gitconfig");
+            if let Ok(config) = GitConfig::load_from_file(global_path) {
+                if let Some(cmd) = config.get_alias(subcmd) {
+                    config_alias = Some(cmd.to_string());
+                }
+            }
+        }
+    }
+
+    let expansion_str = if let Some(ref c) = config_alias {
+        c.as_str()
+    } else if let Some(b) = builtin_expansion {
+        b
+    } else {
+        return raw_args;
+    };
+
+    let mut expanded = Vec::new();
+    expanded.push(raw_args[0].clone());
+
+    // Tokenize alias expansion respecting simple quotes
+    let parts = tokenize_command(expansion_str);
+    expanded.extend(parts);
+    expanded.extend_from_slice(&raw_args[2..]);
+    expanded
+}
+
+fn tokenize_command(cmd: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    for c in cmd.chars() {
+        match c {
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+            }
+            ' ' | '\t' if !in_single_quote && !in_double_quote => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            other => current.push(other),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
 }
 
 fn dispatch_command(cmd: Commands) -> Result<()> {
@@ -1012,6 +1108,7 @@ fn cmd_status() -> Result<()> {
                 StagedChange::New(p) => println!("\tnew file:   {}", p),
                 StagedChange::Modified(p) => println!("\tmodified:   {}", p),
                 StagedChange::Deleted(p) => println!("\tdeleted:    {}", p),
+                StagedChange::Renamed { from, to } => println!("\trenamed:    {} -> {}", from, to),
             }
         }
         println!();
@@ -1249,7 +1346,7 @@ fn cmd_log(max_count: Option<usize>, oneline: bool, graph: bool, tui: bool) -> R
 fn cmd_diff(staged: bool) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
     let repo_root = git_dir.parent().context("git_dir has no parent")?;
-    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let store = RepoObjectStore::open(&git_dir)?;
     let ref_store = RefStore::new(&git_dir);
     let index_path = git_dir.join("index");
     let index = Index::load_from(&index_path)?;
@@ -1273,7 +1370,32 @@ fn cmd_diff(staged: bool) -> Result<()> {
             std::collections::BTreeMap::new()
         };
 
-        for entry in index.entries() {
+        // Detect staged renames: match deleted HEAD files with identical OID in new index entries
+        let mut matched_deleted = std::collections::HashSet::new();
+        let mut matched_new = std::collections::HashSet::new();
+
+        for (i, entry) in index.entries().iter().enumerate() {
+            if !head_map.contains_key(&entry.path) {
+                if let Some((del_path, _)) = head_map.iter().find(|(p, (_mode, head_oid))| {
+                    !index.entries().iter().any(|e| &e.path == *p)
+                        && !matched_deleted.contains(*p)
+                        && head_oid == &entry.oid
+                }) {
+                    matched_deleted.insert(del_path.clone());
+                    matched_new.insert(i);
+                    println!("diff --git a/{} b/{}", del_path, entry.path);
+                    println!("similarity index 100%");
+                    println!("rename from {}", del_path);
+                    println!("rename to {}", entry.path);
+                }
+            }
+        }
+
+        for (i, entry) in index.entries().iter().enumerate() {
+            if matched_new.contains(&i) {
+                continue;
+            }
+
             let index_blob = match store.read_object(&entry.oid)? {
                 Object::Blob(b) => String::from_utf8_lossy(&b.data).to_string(),
                 _ => String::new(),
@@ -1310,6 +1432,9 @@ fn cmd_diff(staged: bool) -> Result<()> {
 
         // Deleted files
         for (path, (_mode, head_oid)) in &head_map {
+            if matched_deleted.contains(path) {
+                continue;
+            }
             if index.find_entry(path).is_none() {
                 let head_blob = match store.read_object(head_oid)? {
                     Object::Blob(b) => String::from_utf8_lossy(&b.data).to_string(),
@@ -2134,6 +2259,17 @@ fn cmd_clone(repository: String, directory: Option<String>) -> Result<()> {
                 fetch_local_pack(&local_path, &wants)?
             };
             (refs, def_branch, pack)
+        } else if is_ssh_url(&repository) {
+            let client = SshClient::new();
+            let (refs, _caps, symref_head) = client.discover_upload_pack(&repository)?;
+            let wants: Vec<ObjectId> = refs.iter().map(|r| r.oid).collect();
+            let pack = if wants.is_empty() {
+                Vec::new()
+            } else {
+                let (p, _progress) = client.fetch_pack(&repository, &wants, &[])?;
+                p
+            };
+            (refs, symref_head, pack)
         } else {
             let client = SmartHttpClient::new();
             let (refs, _caps, symref_head) = client.discover_upload_pack(&repository)?;
@@ -2256,6 +2392,21 @@ fn cmd_fetch(remote_opt: Option<String>) -> Result<()> {
             fetch_local_pack(&local_path, &wants)?
         };
         (refs, pack)
+    } else if is_ssh_url(url) {
+        let client = SshClient::new();
+        let (refs, _, _) = client.discover_upload_pack(url)?;
+        let wants: Vec<ObjectId> = refs
+            .iter()
+            .filter(|r| !store.exists(&r.oid))
+            .map(|r| r.oid)
+            .collect();
+        let pack = if wants.is_empty() {
+            Vec::new()
+        } else {
+            let (p, _) = client.fetch_pack(url, &wants, &[])?;
+            p
+        };
+        (refs, pack)
     } else {
         let client = SmartHttpClient::new();
         let (refs, _, _) = client.discover_upload_pack(url)?;
@@ -2346,13 +2497,17 @@ fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>) -> Result<()
     let local_oid = ref_store.read_ref(&local_ref_name)?;
 
     // Discover remote refs
-    let (remote_refs, is_local) = if let Some(local_path) = resolve_local_path(url) {
+    let (remote_refs, is_local, is_ssh) = if let Some(local_path) = resolve_local_path(url) {
         let (refs, _) = discover_local_refs(&local_path)?;
-        (refs, Some(local_path))
+        (refs, Some(local_path), false)
+    } else if is_ssh_url(url) {
+        let client = SshClient::new();
+        let (refs, _) = client.discover_receive_pack(url)?;
+        (refs, None, true)
     } else {
         let client = SmartHttpClient::new();
         let (refs, _) = client.discover_receive_pack(url)?;
-        (refs, None)
+        (refs, None, false)
     };
 
     let remote_target_name = format!("refs/heads/{}", branch);
@@ -2387,6 +2542,16 @@ fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>) -> Result<()
         // Update branch ref in destination
         let dest_ref_store = RefStore::new(&dest_git_dir);
         dest_ref_store.update_ref(&remote_target_name, &local_oid, None, "push: from local")?;
+    } else if is_ssh {
+        let client = SshClient::new();
+        let report = client.push_pack(
+            url,
+            &[(&remote_old_oid, &local_oid, &remote_target_name)],
+            &pack_bytes,
+        )?;
+        if !report.is_empty() {
+            println!("{}", report);
+        }
     } else {
         let client = SmartHttpClient::new();
         let report = client.push_pack(

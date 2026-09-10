@@ -80,5 +80,25 @@ All notable changes to the **Oxidize** project will be documented in this file.
 - Authored comprehensive documentation in `README.md`: architectural diagrams (ASCII & Mermaid), binary format cheat sheets (Index v2, Pack v2, Commit format), CLI command reference, comparison matrix vs Git, and performance reports.
 - Maintained 100% clean compilation: `cargo clippy --all -- -D warnings`, `cargo fmt --all -- --check`, and 32 passing unit and differential integration tests against official Git.
 
+### Phase 10: Scope Boundary Extensions & Git Parity (Completed)
+- Implemented command alias expansion in `crates/cli`:
+  - Built-in shorthand aliases: `st` -> `status`, `co` -> `checkout`, `ci` -> `commit`, `br` -> `branch`, `df` -> `diff`, `rb` -> `rebase`, `cp` -> `cherry-pick`.
+  - Custom user aliases parsed from local `.git/config` and global `~/.gitconfig` under the `[alias]` section (e.g. `lg = log --oneline --graph`).
+  - Added quotes-aware command tokenizer (`tokenize_command`) supporting complex arguments and flags.
+- Implemented 100% exact rename detection in status and diff:
+  - Added `StagedChange::Renamed { from, to }` to `oxidize-index`.
+  - Staged deletions and additions with matching object IDs are detected and presented as `renamed: <from> -> <to>` in `ox status`.
+  - Unified diff format in `ox diff --staged` synthesizes `similarity index 100%`, `rename from <from>`, and `rename to <to>` headers.
+- Implemented native SSH transport (`oxidize_transport::ssh`):
+  - Support for `ssh://...` and SCP-like `git@host:path` URLs.
+  - Automatic SSH executable detection (`GIT_SSH_COMMAND`, `GIT_SSH`, `PATH`, and Windows Git fallback paths).
+  - Pkt-line streaming and sideband multiplexing over system SSH child process.
+  - Integrated into `ox clone`, `ox fetch`, `ox pull`, and `ox push`.
+- Implemented Git Index Version 4 format reader support:
+  - Added `read_v4_entry` to `IndexEntry` with prefix compression decoding (varint strip count + suffix) and no 8-byte padding.
+  - Enabled reading index v4 repositories in `Index::load_from`.
+- Added integration test suite (`tests/scope_boundaries_test.rs`) verifying all four scope boundaries, bringing total passing test suite to 36 tests.
+
+
 
 
