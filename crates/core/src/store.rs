@@ -3,6 +3,7 @@
 use crate::error::CoreError;
 use crate::id::ObjectId;
 use crate::object::{Blob, Commit, FileMode, Object, ObjectType, Signature, Tag, Tree, TreeEntry};
+use crate::path::strip_verbatim_prefix;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
@@ -200,23 +201,156 @@ impl LooseObjectStore {
     }
 }
 
-/// Locates the `.git` directory starting from `start` and traversing ancestors.
-pub fn find_git_dir(start: &Path) -> Result<PathBuf, CoreError> {
-    let mut current = if start.is_relative() {
-        std::env::current_dir()?.join(start)
-    } else {
-        start.to_path_buf()
-    };
+/// Repository layout context distinguishing worktree, git dir, common dir, and bare mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoContext {
+    /// Working tree root directory, if this repository has a worktree.
+    pub worktree: Option<PathBuf>,
+    /// Git directory for this worktree (contains index, HEAD, MERGE_HEAD, etc.).
+    pub git_dir: PathBuf,
+    /// Common git directory (contains objects, refs, config, hooks).
+    /// Same as `git_dir` for standard repositories and bare repositories.
+    /// Points to main repository for linked worktrees.
+    pub common_dir: PathBuf,
+    /// Whether this repository is bare.
+    pub is_bare: bool,
+}
 
-    loop {
-        let candidate = current.join(".git");
-        if candidate.is_dir() {
-            return Ok(candidate);
+impl RepoContext {
+    /// Discovers repository context starting from `start` and walking ancestor directories.
+    pub fn discover(start: &Path) -> Result<Self, CoreError> {
+        let mut current = if start.is_relative() {
+            std::env::current_dir()?.join(start)
+        } else {
+            start.to_path_buf()
+        };
+
+        if let Ok(canon) = current.canonicalize() {
+            current = strip_verbatim_prefix(&canon);
         }
-        if !current.pop() {
-            return Err(CoreError::RepoNotFound);
+
+        loop {
+            let candidate = current.join(".git");
+            if candidate.is_dir() {
+                // Check for linked worktree (commondir file inside git_dir)
+                let commondir_file = candidate.join("commondir");
+                let common_dir = if commondir_file.is_file() {
+                    let rel = std::fs::read_to_string(&commondir_file)?.trim().to_string();
+                    candidate.join(rel)
+                } else {
+                    candidate.clone()
+                };
+
+                let common_dir =
+                    strip_verbatim_prefix(&common_dir.canonicalize().unwrap_or(common_dir));
+                let candidate =
+                    strip_verbatim_prefix(&candidate.canonicalize().unwrap_or(candidate));
+                let worktree = Some(current.clone());
+
+                return Ok(Self {
+                    worktree,
+                    git_dir: candidate,
+                    common_dir,
+                    is_bare: false,
+                });
+            } else if candidate.is_file() {
+                // Gitfile: e.g. "gitdir: <path>"
+                let content = std::fs::read_to_string(&candidate)?;
+                let trimmed = content.trim();
+                if let Some(rest) = trimmed.strip_prefix("gitdir:") {
+                    let gitdir_path_str = rest.trim();
+                    let target_gitdir = if Path::new(gitdir_path_str).is_relative() {
+                        current.join(gitdir_path_str)
+                    } else {
+                        PathBuf::from(gitdir_path_str)
+                    };
+                    let target_gitdir = strip_verbatim_prefix(
+                        &target_gitdir.canonicalize().unwrap_or(target_gitdir),
+                    );
+                    if target_gitdir.is_dir() {
+                        let commondir_file = target_gitdir.join("commondir");
+                        let common_dir = if commondir_file.is_file() {
+                            let rel = std::fs::read_to_string(&commondir_file)?.trim().to_string();
+                            target_gitdir.join(rel)
+                        } else {
+                            target_gitdir.clone()
+                        };
+                        let common_dir =
+                            strip_verbatim_prefix(&common_dir.canonicalize().unwrap_or(common_dir));
+                        return Ok(Self {
+                            worktree: Some(current),
+                            git_dir: target_gitdir,
+                            common_dir,
+                            is_bare: false,
+                        });
+                    }
+                }
+                return Err(CoreError::RepoNotFound);
+            }
+
+            // Check if current directory itself is a bare repository or a .git directory
+            if current.join("HEAD").is_file()
+                && current.join("objects").is_dir()
+                && current.join("refs").is_dir()
+            {
+                // If this directory is named ".git", it is the git_dir of its parent worktree,
+                // unless bare = true is configured in config.
+                let is_named_git = current.file_name().map(|n| n == ".git").unwrap_or(false);
+                let is_bare_config =
+                    if let Ok(cfg) = std::fs::read_to_string(current.join("config")) {
+                        cfg.lines().any(|l| {
+                            let t = l.trim();
+                            t == "bare = true" || t == "bare=true"
+                        })
+                    } else {
+                        false
+                    };
+
+                if is_named_git && !is_bare_config {
+                    if let Some(parent) = current.parent() {
+                        let git_dir = strip_verbatim_prefix(
+                            &current.canonicalize().unwrap_or(current.clone()),
+                        );
+                        let commondir_file = git_dir.join("commondir");
+                        let common_dir = if commondir_file.is_file() {
+                            let rel = std::fs::read_to_string(&commondir_file)?.trim().to_string();
+                            git_dir.join(rel)
+                        } else {
+                            git_dir.clone()
+                        };
+                        let common_dir =
+                            strip_verbatim_prefix(&common_dir.canonicalize().unwrap_or(common_dir));
+                        let worktree = strip_verbatim_prefix(
+                            &parent.canonicalize().unwrap_or(parent.to_path_buf()),
+                        );
+                        return Ok(Self {
+                            worktree: Some(worktree),
+                            git_dir,
+                            common_dir,
+                            is_bare: false,
+                        });
+                    }
+                }
+
+                let bare_dir = strip_verbatim_prefix(&current.canonicalize().unwrap_or(current));
+                return Ok(Self {
+                    worktree: None,
+                    git_dir: bare_dir.clone(),
+                    common_dir: bare_dir,
+                    is_bare: true,
+                });
+            }
+
+            if !current.pop() {
+                return Err(CoreError::RepoNotFound);
+            }
         }
     }
+}
+
+/// Locates the `.git` directory starting from `start` and traversing ancestors.
+pub fn find_git_dir(start: &Path) -> Result<PathBuf, CoreError> {
+    RepoContext::discover(start).map(|ctx| ctx.git_dir)
 }
 
 /// Parses raw decompressed bytes into an `Object`.
@@ -291,6 +425,10 @@ fn parse_tree_content(data: &[u8]) -> Result<Object, CoreError> {
                 object_type: "tree",
                 reason: "invalid name utf8".to_string(),
             }
+        })?;
+        crate::path::validate_tree_component(name).map_err(|e| CoreError::ParseError {
+            object_type: "tree",
+            reason: format!("invalid tree entry name '{}': {}", name, e),
         })?;
 
         let oid_start = nul_pos + 1;
@@ -466,4 +604,71 @@ fn parse_tag_content(data: &[u8]) -> Result<Object, CoreError> {
 
 fn parse_signature(s: &str) -> Result<Signature, CoreError> {
     Signature::parse(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_repo_context_discover_standard() {
+        let temp = TempDir::new().unwrap();
+        let repo_root = temp.path().join("repo");
+        fs::create_dir(&repo_root).unwrap();
+        fs::create_dir(repo_root.join(".git")).unwrap();
+
+        let sub_dir = repo_root.join("sub").join("nested");
+        fs::create_dir_all(&sub_dir).unwrap();
+
+        let ctx = RepoContext::discover(&sub_dir).unwrap();
+        assert!(!ctx.is_bare);
+        assert_eq!(ctx.worktree.unwrap(), repo_root);
+        assert_eq!(ctx.git_dir, repo_root.join(".git"));
+        assert_eq!(ctx.common_dir, repo_root.join(".git"));
+    }
+
+    #[test]
+    fn test_repo_context_discover_gitfile_and_linked_worktree() {
+        let temp = TempDir::new().unwrap();
+        let main_repo = temp.path().join("main_repo");
+        let main_git = main_repo.join(".git");
+        fs::create_dir_all(&main_git).unwrap();
+
+        // Linked worktree repo
+        let worktree_dir = temp.path().join("wt");
+        fs::create_dir_all(&worktree_dir).unwrap();
+
+        let wt_gitdir = main_git.join("worktrees").join("wt");
+        fs::create_dir_all(&wt_gitdir).unwrap();
+        fs::write(wt_gitdir.join("commondir"), "../..\n").unwrap();
+
+        // Worktree has .git file pointing to wt_gitdir
+        fs::write(
+            worktree_dir.join(".git"),
+            format!("gitdir: {}\n", wt_gitdir.display()),
+        )
+        .unwrap();
+
+        let ctx = RepoContext::discover(&worktree_dir).unwrap();
+        assert!(!ctx.is_bare);
+        assert_eq!(ctx.worktree.unwrap(), worktree_dir);
+        assert_eq!(ctx.git_dir, wt_gitdir);
+        assert_eq!(ctx.common_dir, main_git);
+    }
+
+    #[test]
+    fn test_repo_context_discover_bare() {
+        let temp = TempDir::new().unwrap();
+        let bare_dir = temp.path().join("bare.git");
+        fs::create_dir_all(bare_dir.join("objects")).unwrap();
+        fs::create_dir_all(bare_dir.join("refs")).unwrap();
+        fs::write(bare_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let ctx = RepoContext::discover(&bare_dir).unwrap();
+        assert!(ctx.is_bare);
+        assert!(ctx.worktree.is_none());
+        assert_eq!(ctx.git_dir, bare_dir);
+        assert_eq!(ctx.common_dir, bare_dir);
+    }
 }

@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing to **Oxidize**! We welcome bug reports, feature suggestions, architectural improvements, and code contributions.
 
-Oxidize is built from scratch in pure Rust to be a production-ready, daily-driver-capable Git implementation that is 100% byte-compatible with official Git.
+Oxidize is built from scratch in pure Rust to provide a high-performance Git implementation with verified bidirectional compatibility against official Git.
 
 ---
 

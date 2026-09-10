@@ -2,6 +2,7 @@
 name = "oxidize-tests"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 
@@ -48,6 +49,10 @@ path = "scope_boundaries_test.rs"
 [[test]]
 name = "new_features_test"
 path = "new_features_test.rs"
+
+[[test]]
+name = "safety_boundaries_test"
+path = "safety_boundaries_test.rs"
 
 [dev-dependencies]
 oxidize-core.workspace = true

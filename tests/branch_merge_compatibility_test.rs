@@ -168,13 +168,16 @@ fn test_three_way_merge_with_conflicts() {
         .output()
         .unwrap();
 
-    // Attempt merge dev into master
+    // Attempt merge dev into master (exits with non-zero on conflict)
     let merge_out = Command::new(ox_bin())
         .args(["merge", "dev"])
         .current_dir(tmp.path())
         .output()
         .unwrap();
-    assert!(merge_out.status.success());
+    assert!(
+        !merge_out.status.success(),
+        "merge with conflict should exit with non-zero status"
+    );
     let merge_stdout = String::from_utf8_lossy(&merge_out.stdout);
     assert!(merge_stdout.contains("CONFLICT"));
 

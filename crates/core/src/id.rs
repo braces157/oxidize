@@ -51,6 +51,11 @@ impl ObjectId {
         let hex = self.to_string();
         hex.starts_with(prefix)
     }
+
+    /// Computes the Git blob SHA-1 ObjectId for raw payload bytes.
+    pub fn hash_blob(data: &[u8]) -> Self {
+        crate::object::Blob::hash(data)
+    }
 }
 
 impl fmt::Display for ObjectId {

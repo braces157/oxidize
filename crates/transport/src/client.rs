@@ -2,8 +2,8 @@
 
 use crate::pkt_line::{read_pkt_lines, SidebandDemuxer};
 use crate::protocol::{
-    build_receive_pack_request, build_upload_pack_request, parse_ref_advertisement, RemoteRef,
-    UploadPackDiscovery,
+    build_receive_pack_request_with_caps, build_upload_pack_request_with_caps,
+    parse_ref_advertisement, RemoteRef, UploadPackDiscovery,
 };
 use crate::TransportError;
 use oxidize_core::id::ObjectId;
@@ -52,8 +52,19 @@ impl SmartHttpClient {
         wants: &[ObjectId],
         haves: &[ObjectId],
     ) -> Result<(Vec<u8>, Vec<String>), TransportError> {
+        self.fetch_pack_with_caps(url, wants, haves, &[])
+    }
+
+    /// Fetches a packfile using negotiated server capabilities.
+    pub fn fetch_pack_with_caps(
+        &self,
+        url: &str,
+        wants: &[ObjectId],
+        haves: &[ObjectId],
+        server_caps: &[String],
+    ) -> Result<(Vec<u8>, Vec<String>), TransportError> {
         let endpoint = format!("{}/git-upload-pack", url.trim_end_matches('/'));
-        let body = build_upload_pack_request(wants, haves);
+        let body = build_upload_pack_request_with_caps(wants, haves, server_caps);
 
         let response = ureq::post(&endpoint)
             .set("User-Agent", &self.user_agent)
@@ -62,8 +73,7 @@ impl SmartHttpClient {
             .send_bytes(&body)
             .map_err(|e| TransportError::Http(format!("POST {}: {}", endpoint, e)))?;
 
-        let lines = read_pkt_lines(response.into_reader())?;
-        let demux = SidebandDemuxer::from_lines(&lines)?;
+        let demux = SidebandDemuxer::read_stream(response.into_reader())?;
 
         if demux.pack_data.is_empty() {
             return Err(TransportError::Protocol(
@@ -99,9 +109,20 @@ impl SmartHttpClient {
         url: &str,
         updates: &[(&ObjectId, &ObjectId, &str)],
         pack_data: &[u8],
-    ) -> Result<String, TransportError> {
+    ) -> Result<crate::protocol::PushReport, TransportError> {
+        self.push_pack_with_caps(url, updates, pack_data, &[])
+    }
+
+    /// Pushes local commits to the remote server using `git-receive-pack` and negotiated capabilities.
+    pub fn push_pack_with_caps(
+        &self,
+        url: &str,
+        updates: &[(&ObjectId, &ObjectId, &str)],
+        pack_data: &[u8],
+        server_caps: &[String],
+    ) -> Result<crate::protocol::PushReport, TransportError> {
         let endpoint = format!("{}/git-receive-pack", url.trim_end_matches('/'));
-        let body = build_receive_pack_request(updates, pack_data);
+        let body = build_receive_pack_request_with_caps(updates, pack_data, server_caps);
 
         let response = ureq::post(&endpoint)
             .set("User-Agent", &self.user_agent)
@@ -110,13 +131,6 @@ impl SmartHttpClient {
             .map_err(|e| TransportError::Http(format!("POST {}: {}", endpoint, e)))?;
 
         let lines = read_pkt_lines(response.into_reader())?;
-        let mut report = Vec::new();
-        for line in lines {
-            if let Some(text) = line.to_text() {
-                report.push(text.to_string());
-            }
-        }
-
-        Ok(report.join("\n"))
+        crate::protocol::parse_push_report(&lines)
     }
 }

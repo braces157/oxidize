@@ -85,8 +85,8 @@ impl IndexEntry {
         #[cfg(unix)]
         let (dev, ino, uid, gid, mode) = {
             use std::os::unix::fs::MetadataExt;
-            let mode = if metadata.permissions().readonly() {
-                0o100644
+            let mode = if metadata.file_type().is_symlink() {
+                0o120000
             } else if metadata.mode() & 0o111 != 0 {
                 0o100755
             } else {
@@ -103,8 +103,12 @@ impl IndexEntry {
 
         #[cfg(not(unix))]
         let (dev, ino, uid, gid, mode) = {
-            // Windows fallback defaults: Git for Windows uses mode 100644 for regular files
-            (0, 0, 0, 0, 0o100644)
+            let mode = if metadata.file_type().is_symlink() {
+                0o120000
+            } else {
+                0o100644
+            };
+            (0, 0, 0, 0, mode)
         };
 
         Self {
@@ -304,7 +308,65 @@ impl IndexEntry {
         let pad = 8 - ((62 + path_bytes.len()) % 8);
         let padding = vec![0u8; pad];
         writer.write_all(&padding)?;
-
         Ok(62 + path_bytes.len() + pad)
     }
+
+    /// Serializes the index entry for Index Version 4 format using path prefix compression.
+    pub fn write_v4_to<W: Write>(
+        &self,
+        writer: &mut W,
+        prev_path: &str,
+    ) -> Result<usize, std::io::Error> {
+        writer.write_u32::<BigEndian>(self.ctime_sec)?;
+        writer.write_u32::<BigEndian>(self.ctime_nsec)?;
+        writer.write_u32::<BigEndian>(self.mtime_sec)?;
+        writer.write_u32::<BigEndian>(self.mtime_nsec)?;
+        writer.write_u32::<BigEndian>(self.dev)?;
+        writer.write_u32::<BigEndian>(self.ino)?;
+        writer.write_u32::<BigEndian>(self.mode)?;
+        writer.write_u32::<BigEndian>(self.uid)?;
+        writer.write_u32::<BigEndian>(self.gid)?;
+        writer.write_u32::<BigEndian>(self.file_size)?;
+        writer.write_all(self.oid.as_bytes())?;
+
+        let mut flags: u16 = 0;
+        if self.assume_valid {
+            flags |= 0x8000;
+        }
+        flags |= ((self.stage as u16) & 0x03) << 12;
+        let path_bytes = self.path.as_bytes();
+        let len_field = path_bytes.len().min(0x0FFF) as u16;
+        flags |= len_field;
+        writer.write_u16::<BigEndian>(flags)?;
+
+        // Find common prefix with prev_path
+        let common_prefix_len = prev_path
+            .as_bytes()
+            .iter()
+            .zip(path_bytes)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let strip_count = prev_path.len() - common_prefix_len;
+        let suffix = &self.path[common_prefix_len..];
+
+        let varint = encode_varint(strip_count);
+        writer.write_all(&varint)?;
+        writer.write_all(suffix.as_bytes())?;
+        writer.write_all(&[0u8])?;
+
+        Ok(62 + varint.len() + suffix.len() + 1)
+    }
+}
+
+/// Encodes an unsigned integer using Git's variable-length integer encoding.
+pub fn encode_varint(mut value: usize) -> Vec<u8> {
+    let mut buf = [0u8; 16];
+    let mut pos = buf.len() - 1;
+    buf[pos] = (value & 127) as u8;
+    while value >= 128 {
+        value = (value >> 7) - 1;
+        pos -= 1;
+        buf[pos] = (128 | (value & 127)) as u8;
+    }
+    buf[pos..].to_vec()
 }

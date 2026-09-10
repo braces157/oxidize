@@ -4,9 +4,9 @@ use crate::entry::IndexEntry;
 use crate::IndexError;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use sha1::{Digest, Sha1};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Git index representation containing staged file entries.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -86,10 +86,10 @@ impl Index {
         Ok(Self { version, entries })
     }
 
-    /// Writes the index atomically to disk using a `.lock` file.
+    /// Writes the index atomically to disk using an exclusive `.lock` file.
     pub fn write_to(&self, path: impl AsRef<Path>) -> Result<(), IndexError> {
         let path = path.as_ref();
-        let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+        let mut lock = oxidize_core::LockFile::acquire(path)?;
 
         let mut payload = Vec::new();
 
@@ -102,8 +102,16 @@ impl Index {
         let mut sorted_entries = self.entries.clone();
         sorted_entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.stage.cmp(&b.stage)));
 
-        for entry in &sorted_entries {
-            entry.write_to(&mut payload)?;
+        if self.version == 4 {
+            let mut prev_path = String::new();
+            for entry in &sorted_entries {
+                entry.write_v4_to(&mut payload, &prev_path)?;
+                prev_path = entry.path.clone();
+            }
+        } else {
+            for entry in &sorted_entries {
+                entry.write_to(&mut payload)?;
+            }
         }
 
         // 3. Trailing SHA-1 checksum
@@ -112,18 +120,8 @@ impl Index {
         let checksum: [u8; 20] = hasher.finalize().into();
         payload.extend_from_slice(&checksum);
 
-        // Write to lock file and rename atomically
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        {
-            let mut file = File::create(&lock_path)?;
-            file.write_all(&payload)?;
-            file.flush()?;
-        }
-
-        fs::rename(lock_path, path)?;
+        lock.write_all(&payload).map_err(IndexError::Io)?;
+        lock.commit()?;
 
         Ok(())
     }
@@ -132,21 +130,95 @@ impl Index {
     /// Adding a stage 0 entry removes any unmerged stage entries (1, 2, 3) for that path.
     pub fn add_entry(&mut self, entry: IndexEntry) {
         if entry.stage == 0 {
-            self.entries.retain(|e| e.path != entry.path);
-            self.entries.push(entry);
-            self.entries
-                .sort_by(|a, b| a.path.cmp(&b.path).then(a.stage.cmp(&b.stage)));
-        } else if let Some(pos) = self
-            .entries
-            .iter()
-            .position(|e| e.path == entry.path && e.stage == entry.stage)
-        {
-            self.entries[pos] = entry;
+            let start = self
+                .entries
+                .partition_point(|e| e.path.as_str() < entry.path.as_str());
+            let count = self.entries[start..]
+                .iter()
+                .take_while(|e| e.path == entry.path)
+                .count();
+            if count > 0 {
+                self.entries.drain(start..start + count);
+            }
+            self.entries.insert(start, entry);
         } else {
-            self.entries.push(entry);
-            self.entries
-                .sort_by(|a, b| a.path.cmp(&b.path).then(a.stage.cmp(&b.stage)));
+            let key = (entry.path.as_str(), entry.stage);
+            match self
+                .entries
+                .binary_search_by(|e| (e.path.as_str(), e.stage).cmp(&key))
+            {
+                Ok(pos) => self.entries[pos] = entry,
+                Err(pos) => self.entries.insert(pos, entry),
+            }
         }
+    }
+
+    /// Adds or updates multiple entries efficiently in a single bulk sort/merge pass.
+    pub fn add_entries(&mut self, mut new_entries: Vec<IndexEntry>) {
+        if new_entries.is_empty() {
+            return;
+        }
+
+        // Sort new entries canonically
+        new_entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.stage.cmp(&b.stage)));
+
+        // Dedup new_entries: if multiple for same (path, stage), keep last
+        new_entries.dedup_by(|a, b| {
+            if a.path == b.path && (a.stage == 0 || a.stage == b.stage) {
+                *b = a.clone();
+                true
+            } else {
+                false
+            }
+        });
+
+        // Collect paths that have stage 0 in new_entries (these clear any stage 1..3 in old)
+        let stage0_paths: std::collections::HashSet<String> = new_entries
+            .iter()
+            .filter(|e| e.stage == 0)
+            .map(|e| e.path.clone())
+            .collect();
+
+        // Drain old entries that are replaced or superseded by stage 0
+        let old_entries = std::mem::take(&mut self.entries);
+        let mut merged = Vec::with_capacity(old_entries.len() + new_entries.len());
+
+        let mut old_iter = old_entries.into_iter().peekable();
+        let mut new_iter = new_entries.into_iter().peekable();
+
+        while let (Some(old_e), Some(new_e)) = (old_iter.peek(), new_iter.peek()) {
+            let old_key = (old_e.path.as_str(), old_e.stage);
+            let new_key = (new_e.path.as_str(), new_e.stage);
+
+            if stage0_paths.contains(old_e.path.as_str()) && old_e.stage != 0 {
+                // Superseded unmerged entry
+                old_iter.next();
+                continue;
+            }
+
+            match old_key.cmp(&new_key) {
+                std::cmp::Ordering::Less => {
+                    merged.push(old_iter.next().unwrap());
+                }
+                std::cmp::Ordering::Greater => {
+                    merged.push(new_iter.next().unwrap());
+                }
+                std::cmp::Ordering::Equal => {
+                    // New entry overwrites old entry
+                    merged.push(new_iter.next().unwrap());
+                    old_iter.next();
+                }
+            }
+        }
+
+        for old_e in old_iter {
+            if !(stage0_paths.contains(old_e.path.as_str()) && old_e.stage != 0) {
+                merged.push(old_e);
+            }
+        }
+        merged.extend(new_iter);
+
+        self.entries = merged;
     }
 
     /// Removes an entry by repository-relative path.
@@ -239,5 +311,63 @@ mod tests {
         assert_eq!(loaded.entries.len(), 2);
         assert_eq!(loaded.entries[0].path, "file1.txt");
         assert_eq!(loaded.entries[1].path, "file2.txt");
+    }
+
+    #[test]
+    fn test_bulk_add_entries_and_ordering() {
+        use oxidize_core::ObjectId;
+        let mut index = Index::new();
+        let e1 = IndexEntry {
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            dev: 0,
+            ino: 0,
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            file_size: 10,
+            oid: ObjectId::from_bytes([1u8; 20]),
+            assume_valid: false,
+            path: "z_file.txt".to_string(),
+            stage: 0,
+        };
+        let e2 = IndexEntry {
+            path: "a_file.txt".to_string(),
+            ..e1.clone()
+        };
+        let e3 = IndexEntry {
+            path: "m_file.txt".to_string(),
+            ..e1.clone()
+        };
+
+        index.add_entries(vec![e1, e2, e3]);
+        assert_eq!(index.entries.len(), 3);
+        assert_eq!(index.entries[0].path, "a_file.txt");
+        assert_eq!(index.entries[1].path, "m_file.txt");
+        assert_eq!(index.entries[2].path, "z_file.txt");
+
+        // Adding an unmerged stage entry then stage 0 replaces unmerged
+        let mut stage2 = index.entries[1].clone();
+        stage2.stage = 2;
+        let mut stage3 = index.entries[1].clone();
+        stage3.stage = 3;
+        index.add_entry(stage2);
+        index.add_entry(stage3);
+        assert_eq!(index.entries.len(), 5);
+
+        let resolved = index.entries[0].clone();
+        let mut resolved_m = index.entries[0].clone();
+        resolved_m.path = "m_file.txt".to_string();
+        index.add_entries(vec![resolved, resolved_m]);
+        // All stage 1..3 for m_file.txt should be cleared
+        let m_stages: Vec<u8> = index
+            .entries
+            .iter()
+            .filter(|e| e.path == "m_file.txt")
+            .map(|e| e.stage)
+            .collect();
+        assert_eq!(m_stages, vec![0]);
     }
 }

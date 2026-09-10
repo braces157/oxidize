@@ -1,0 +1,271 @@
+{
+  "temporary_root": "C:\\Users\\PC\\AppData\\Local\\Temp\\oxidize-review-8zq6u8c7",
+  "results": [
+    {
+      "case": "dirty checkout",
+      "git": {
+        "command": [
+          "git",
+          "checkout",
+          "other"
+        ],
+        "code": 1,
+        "stdout": "",
+        "stderr": "error: Your local changes to the following files would be overwritten by checkout:\n\ta.txt\nPlease commit your changes or stash them before you switch branches.\nAborting"
+      },
+      "ox": {
+        "command": [
+          "ox.exe",
+          "checkout",
+          "other"
+        ],
+        "code": 0,
+        "stdout": "Switched to branch 'other'",
+        "stderr": ""
+      },
+      "content_after_ox": "other\n"
+    },
+    {
+      "case": "v4 mutation",
+      "ox": {
+        "command": [
+          "ox.exe",
+          "add",
+          "b.txt"
+        ],
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "git": {
+        "command": [
+          "git",
+          "ls-files",
+          "--stage"
+        ],
+        "code": 128,
+        "stdout": "",
+        "stderr": "fatal: malformed name field in the index, near path '.txt'"
+      }
+    },
+    {
+      "case": "existing index lock",
+      "ox": {
+        "command": [
+          "ox.exe",
+          "add",
+          "a.txt"
+        ],
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "lock_exists_after": false
+    },
+    {
+      "case": "existing ref lock",
+      "ox": {
+        "command": [
+          "ox.exe",
+          "update-ref",
+          "refs/heads/main",
+          "97977ec528e24afbd22bed029e461ed6ba3f6f6a"
+        ],
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "lock_exists_after": false
+    },
+    {
+      "case": "packed checkout",
+      "ox": {
+        "command": [
+          "ox.exe",
+          "checkout",
+          "main"
+        ],
+        "code": 1,
+        "stdout": "",
+        "stderr": "Error: object not found: 97977ec528e24afbd22bed029e461ed6ba3f6f6a"
+      },
+      "git": {
+        "command": [
+          "git",
+          "checkout",
+          "main"
+        ],
+        "code": 0,
+        "stdout": "",
+        "stderr": "Already on 'main'"
+      }
+    },
+    {
+      "case": "rm without force",
+      "git": {
+        "command": [
+          "git",
+          "rm",
+          "a.txt"
+        ],
+        "code": 1,
+        "stdout": "",
+        "stderr": "error: the following file has local modifications:\n    a.txt\n(use --cached to keep the file, or -f to force removal)"
+      },
+      "ox": {
+        "command": [
+          "ox.exe",
+          "rm",
+          "a.txt"
+        ],
+        "code": 0,
+        "stdout": "rm 'a.txt'",
+        "stderr": ""
+      },
+      "file_exists_after": false
+    },
+    {
+      "case": "recursive rm untracked collateral",
+      "ox": {
+        "command": [
+          "ox.exe",
+          "rm",
+          "-r",
+          "folder"
+        ],
+        "code": 0,
+        "stdout": "rm 'folder/tracked.txt'",
+        "stderr": ""
+      },
+      "untracked_exists_after": false
+    },
+    {
+      "case": "ref namespace traversal",
+      "ox": {
+        "command": [
+          "ox.exe",
+          "branch",
+          "../../review-sentinel"
+        ],
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "wrote_git_root_sentinel": true
+    },
+    {
+      "case": "write-tree with unresolved conflict",
+      "git": {
+        "command": [
+          "git",
+          "write-tree"
+        ],
+        "code": 128,
+        "stdout": "",
+        "stderr": "a.txt: unmerged (db5ca3d5e3eaae11d0c33912c27fac0a7e76c587)\na.txt: unmerged (0a768444a2a875be415f2e28d8cb67f485a58bc5)\na.txt: unmerged (f3ca33e660af76bbd84caf639a2b4afbf325ad5f)\nfatal: git-write-tree: error building trees"
+      },
+      "ox": {
+        "command": [
+          "ox.exe",
+          "write-tree"
+        ],
+        "code": 0,
+        "stdout": "c41ba67b344065939a1088b91adf4f9e9168927b",
+        "stderr": ""
+      }
+    },
+    {
+      "case": "stash pop with two entries",
+      "ox": {
+        "command": [
+          "ox.exe",
+          "stash",
+          "pop"
+        ],
+        "code": 0,
+        "stdout": "Dropped refs/stash@{0} (95a5a16e4248f04f408ff62070e621b21d496bdf)",
+        "stderr": ""
+      },
+      "git_stash_list_after": {
+        "command": [
+          "git",
+          "stash",
+          "list"
+        ],
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "reflog_still_exists": true
+    },
+    {
+      "case": "checkout tree path escapes repository",
+      "ox": {
+        "command": [
+          "ox.exe",
+          "checkout",
+          "malformed"
+        ],
+        "code": 0,
+        "stdout": "Switched to branch 'malformed'",
+        "stderr": ""
+      },
+      "wrote_outside_repo_inside_temp_root": true
+    },
+    {
+      "case": "commit deletion of last tracked file",
+      "ox": {
+        "command": [
+          "ox.exe",
+          "commit",
+          "-m",
+          "delete last file"
+        ],
+        "code": 1,
+        "stdout": "",
+        "stderr": "Error: nothing to commit (create/copy files and use \"ox add\" to track)"
+      }
+    },
+    {
+      "case": "staged executable bit change",
+      "git": {
+        "command": [
+          "git",
+          "diff",
+          "--cached",
+          "--summary"
+        ],
+        "code": 0,
+        "stdout": "mode change 100644 => 100755 a.txt",
+        "stderr": ""
+      },
+      "ox": {
+        "command": [
+          "ox.exe",
+          "status"
+        ],
+        "code": 0,
+        "stdout": "On branch main\nnothing to commit, working tree clean",
+        "stderr": ""
+      }
+    },
+    {
+      "case": "local push overwrites divergent checked-out branch and copies unreachable blob",
+      "ox": {
+        "command": [
+          "ox.exe",
+          "push",
+          "origin",
+          "main"
+        ],
+        "code": 0,
+        "stdout": "To C:\\\\Users\\\\PC\\\\AppData\\\\Local\\\\Temp\\\\oxidize-review-8zq6u8c7\\\\local-push-destination\n   a78d1fb..1cbe577 main -> main",
+        "stderr": ""
+      },
+      "remote_before": "a78d1fb245280a57d86f48987b814508be0a334c",
+      "remote_after": "1cbe5778a634207c77eb18db13a6cc66662043c2",
+      "remote_worktree_still_has_old_file": true,
+      "unreachable_blob_present_at_destination": true
+    }
+  ]
+}

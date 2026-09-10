@@ -1,6 +1,6 @@
 # Git Binary Formats Specification in Oxidize
 
-Oxidize guarantees 100% byte-compatibility with official Git storage layouts and binary serialization standards. This document specifies each format implemented across the Oxidize codebase.
+Oxidize implements canonical Git storage layouts and binary serialization standards for bidirectional interoperability. This document specifies each format implemented across the Oxidize codebase.
 
 ---
 

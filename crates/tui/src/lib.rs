@@ -29,6 +29,96 @@ pub enum TuiError {
     /// Underlying core error.
     #[error("core error: {0}")]
     Core(#[from] oxidize_core::CoreError),
+
+    /// Ref error.
+    #[error("ref error: {0}")]
+    Ref(#[from] oxidize_refs::RefError),
+
+    /// Index error.
+    #[error("index error: {0}")]
+    Index(#[from] oxidize_index::IndexError),
+
+    /// Pack error.
+    #[error("pack error: {0}")]
+    Pack(#[from] oxidize_pack::PackError),
+
+    /// Transport error.
+    #[error("transport error: {0}")]
+    Transport(#[from] oxidize_transport::TransportError),
+}
+
+/// RAII guard managing terminal configuration (raw mode, alternate screen, mouse capture, cursor).
+/// Ensures that every cleanup action is attempted unconditionally upon drop, panic, error, or partial setup.
+#[derive(Debug, Default)]
+pub struct TerminalSessionGuard {
+    pub raw_mode_enabled: bool,
+    pub alt_screen_active: bool,
+    pub mouse_capture_active: bool,
+    pub cursor_hidden: bool,
+}
+
+impl TerminalSessionGuard {
+    /// Creates a new guard with no active states.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Acquires terminal features step-by-step.
+    /// If an intermediate step fails, previously applied states are rolled back via Drop.
+    pub fn acquire() -> Result<Self, TuiError> {
+        let mut guard = Self::new();
+
+        enable_raw_mode()
+            .map_err(|e| TuiError::Terminal(format!("failed to enable raw mode: {}", e)))?;
+        guard.raw_mode_enabled = true;
+
+        let mut out = stdout();
+        execute!(out, EnterAlternateScreen)
+            .map_err(|e| TuiError::Terminal(format!("failed to enter alternate screen: {}", e)))?;
+        guard.alt_screen_active = true;
+
+        execute!(out, EnableMouseCapture)
+            .map_err(|e| TuiError::Terminal(format!("failed to enable mouse capture: {}", e)))?;
+        guard.mouse_capture_active = true;
+
+        execute!(out, crossterm::cursor::Hide)
+            .map_err(|e| TuiError::Terminal(format!("failed to hide cursor: {}", e)))?;
+        guard.cursor_hidden = true;
+
+        Ok(guard)
+    }
+
+    /// Unconditionally attempts all cleanup steps independently.
+    /// Failure in one step does not prevent remaining cleanup steps from executing.
+    pub fn restore(&mut self) {
+        let mut out = stdout();
+
+        if self.cursor_hidden {
+            let _ = execute!(out, crossterm::cursor::Show);
+            self.cursor_hidden = false;
+        }
+
+        if self.mouse_capture_active {
+            let _ = execute!(out, DisableMouseCapture);
+            self.mouse_capture_active = false;
+        }
+
+        if self.alt_screen_active {
+            let _ = execute!(out, LeaveAlternateScreen);
+            self.alt_screen_active = false;
+        }
+
+        if self.raw_mode_enabled {
+            let _ = disable_raw_mode();
+            self.raw_mode_enabled = false;
+        }
+    }
+}
+
+impl Drop for TerminalSessionGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
 }
 
 pub mod app;
@@ -36,7 +126,7 @@ pub mod model;
 pub mod ops;
 pub mod ui;
 
-pub use app::App;
+pub use app::{App, BackgroundJob, BackgroundJobResult};
 pub use model::{
     ActiveModal, BranchItem, BranchesTab, CommitItem, CommitsTab, DiffLine, DiffLineKind, DiffView,
     FileItem, FileStatusKind, FocusedWindow, Panel, ReflogItem, RemoteItem, StashItem, TabMode,
@@ -48,24 +138,24 @@ pub fn run_tui(git_dir: &Path) -> Result<(), TuiError> {
     let mut app = App::new();
     app.load_repository(git_dir)?;
 
-    enable_raw_mode()?;
-    let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+    let mut guard = TerminalSessionGuard::acquire()?;
+
+    let out = stdout();
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = run_loop(&mut terminal, &mut app);
+    // Run event loop with unwind safety so any panic triggers terminal cleanup before propagating
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_loop(&mut terminal, &mut app)
+    }));
 
-    // Always restore terminal state
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    // Restore terminal before checking result or re-raising panic
+    guard.restore();
 
-    res
+    match result {
+        Ok(res) => res,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 fn run_loop<B: ratatui::backend::Backend>(
@@ -73,9 +163,15 @@ fn run_loop<B: ratatui::backend::Backend>(
     app: &mut App,
 ) -> Result<(), TuiError> {
     loop {
+        if app.should_quit {
+            break;
+        }
+
+        app.tick()?;
+
         terminal.draw(|f| ui::render(f, app))?;
 
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
                     // Ignore key release events if terminal sends them

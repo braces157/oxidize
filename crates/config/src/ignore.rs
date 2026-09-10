@@ -69,10 +69,19 @@ impl IgnorePattern {
     }
 }
 
-/// A collection of ignore rules (typically loaded from `.gitignore`).
+/// A single compiled `.gitignore` pattern rule with its directory scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedIgnorePattern {
+    /// Directory scope prefix using forward slashes (e.g. "" for root, "sub/" for sub/).
+    pub scope: String,
+    /// The compiled pattern.
+    pub pattern: IgnorePattern,
+}
+
+/// A collection of ignore rules (typically loaded from `.gitignore` files hierarchically).
 #[derive(Debug, Clone, Default)]
 pub struct GitIgnore {
-    patterns: Vec<IgnorePattern>,
+    patterns: Vec<ScopedIgnorePattern>,
 }
 
 impl GitIgnore {
@@ -81,36 +90,119 @@ impl GitIgnore {
         Self::default()
     }
 
-    /// Parses patterns from a string.
-    pub fn parse(content: &str) -> Self {
-        let mut patterns = Vec::new();
+    /// Appends patterns scoped to a specific directory prefix.
+    pub fn add_patterns(&mut self, scope: &str, content: &str) {
+        let clean_scope = scope.replace('\\', "/");
+        let clean_scope = if clean_scope.is_empty() || clean_scope.ends_with('/') {
+            clean_scope
+        } else {
+            format!("{}/", clean_scope)
+        };
         for line in content.lines() {
             if let Some(pat) = IgnorePattern::parse(line) {
-                patterns.push(pat);
+                self.patterns.push(ScopedIgnorePattern {
+                    scope: clean_scope.clone(),
+                    pattern: pat,
+                });
             }
         }
-        Self { patterns }
     }
 
-    /// Loads `.gitignore` from the root of a repository.
+    /// Parses patterns from a string scoped to root.
+    pub fn parse(content: &str) -> Self {
+        let mut gi = Self::new();
+        gi.add_patterns("", content);
+        gi
+    }
+
+    /// Loads `.gitignore` and nested `.gitignore` files hierarchically starting from the root directory.
     pub fn load_from_dir(dir: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        let ignore_file = dir.as_ref().join(".gitignore");
-        if ignore_file.is_file() {
-            let content = fs::read_to_string(ignore_file)?;
-            Ok(Self::parse(&content))
-        } else {
-            Ok(Self::new())
+        Self::load_hierarchical(dir)
+    }
+
+    /// Loads `.gitignore` files hierarchically across directory depth, including `.git/info/exclude`.
+    pub fn load_hierarchical(dir: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        let root = dir.as_ref();
+        let mut gi = Self::new();
+
+        // 1. .git/info/exclude
+        let exclude_file = root.join(".git").join("info").join("exclude");
+        if exclude_file.is_file() {
+            if let Ok(content) = fs::read_to_string(exclude_file) {
+                gi.add_patterns("", &content);
+            }
         }
+
+        // 2. root .gitignore
+        let root_ignore = root.join(".gitignore");
+        if root_ignore.is_file() {
+            if let Ok(content) = fs::read_to_string(root_ignore) {
+                gi.add_patterns("", &content);
+            }
+        }
+
+        // 3. BFS walk for nested .gitignore
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(root.to_path_buf());
+
+        while let Some(current_dir) = queue.pop_front() {
+            let entries = match fs::read_dir(&current_dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+
+                if name_str == ".git" {
+                    continue;
+                }
+
+                if path.is_dir() {
+                    let rel = match path.strip_prefix(root) {
+                        Ok(r) => r.to_string_lossy().replace('\\', "/"),
+                        Err(_) => continue,
+                    };
+                    // If directory is ignored by current rules, do not descend
+                    if gi.is_ignored(&rel, true) {
+                        continue;
+                    }
+                    // If directory contains a .gitignore, load it
+                    let sub_ignore = path.join(".gitignore");
+                    if sub_ignore.is_file() {
+                        if let Ok(content) = fs::read_to_string(sub_ignore) {
+                            gi.add_patterns(&format!("{}/", rel), &content);
+                        }
+                    }
+                    queue.push_back(path);
+                }
+            }
+        }
+
+        Ok(gi)
     }
 
     /// Returns `true` if the specified path should be ignored.
     pub fn is_ignored(&self, path: &str, is_dir: bool) -> bool {
         let normalized = path.replace('\\', "/");
+        let norm_path = normalized.trim_matches('/');
         let mut ignored = false;
 
-        for pat in &self.patterns {
-            if pat.matches(&normalized, is_dir) {
-                ignored = !pat.is_negation;
+        for scoped in &self.patterns {
+            let rel_path = if scoped.scope.is_empty() {
+                norm_path
+            } else if norm_path == scoped.scope.trim_end_matches('/') {
+                ""
+            } else if let Some(stripped) = norm_path.strip_prefix(&scoped.scope) {
+                stripped
+            } else {
+                continue;
+            };
+
+            if scoped.pattern.matches(rel_path, is_dir) {
+                ignored = !scoped.pattern.is_negation;
             }
         }
 
@@ -228,5 +320,42 @@ doc/**/*.pdf
         assert!(gi.is_ignored("doc/manual.pdf", false));
         assert!(gi.is_ignored("doc/api/v1/spec.pdf", false));
         assert!(!gi.is_ignored("other/manual.pdf", false));
+    }
+
+    #[test]
+    fn test_hierarchical_gitignore() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        // Root ignores *.log
+        fs::write(root.join(".gitignore"), "*.log\n/root.txt\n").unwrap();
+
+        // sub/ contains .gitignore that un-ignores important.log and ignores *.tmp
+        let sub = root.join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(
+            sub.join(".gitignore"),
+            "!important.log\n*.tmp\n/sub_only.txt\n",
+        )
+        .unwrap();
+
+        let gi = GitIgnore::load_hierarchical(root).unwrap();
+
+        // Root rules
+        assert!(gi.is_ignored("app.log", false));
+        assert!(gi.is_ignored("root.txt", false));
+        assert!(!gi.is_ignored("sub/root.txt", false)); // /root.txt was anchored to root
+
+        // Sub overrides root: important.log is unignored in sub
+        assert!(gi.is_ignored("sub/other.log", false));
+        assert!(!gi.is_ignored("sub/important.log", false));
+
+        // Sub rule: *.tmp is ignored in sub, but not in root
+        assert!(gi.is_ignored("sub/test.tmp", false));
+        assert!(!gi.is_ignored("test.tmp", false));
+
+        // Sub rule: /sub_only.txt is anchored to sub
+        assert!(gi.is_ignored("sub/sub_only.txt", false));
+        assert!(!gi.is_ignored("sub/nested/sub_only.txt", false));
     }
 }

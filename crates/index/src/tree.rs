@@ -69,6 +69,18 @@ impl TreeNode {
 /// Builds hierarchical Tree objects from the current index and writes them to the object store.
 /// Returns the root `ObjectId`.
 pub fn write_tree(index: &Index, store: &LooseObjectStore) -> Result<ObjectId, IndexError> {
+    let mut unmerged = Vec::new();
+    for entry in index.entries() {
+        if entry.stage != 0 {
+            unmerged.push(entry.path.clone());
+        }
+    }
+    if !unmerged.is_empty() {
+        unmerged.sort();
+        unmerged.dedup();
+        return Err(IndexError::UnmergedPaths(unmerged.join(", ")));
+    }
+
     let mut root = TreeNode::default();
 
     for entry in index.entries() {

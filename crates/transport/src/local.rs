@@ -96,9 +96,15 @@ pub fn discover_local_refs(
 }
 
 /// Packs all objects required for the given `wants` from a local repository.
-pub fn fetch_local_pack(
+pub fn fetch_local_pack(source_path: &Path, wants: &[ObjectId]) -> Result<Vec<u8>, TransportError> {
+    fetch_local_pack_negotiated(source_path, wants, &[])
+}
+
+/// Packs all objects required for the given `wants` excluding `haves` from a local repository.
+pub fn fetch_local_pack_negotiated(
     source_path: &Path,
-    _wants: &[ObjectId],
+    wants: &[ObjectId],
+    haves: &[ObjectId],
 ) -> Result<Vec<u8>, TransportError> {
     let git_dir = if source_path.join(".git").is_dir() {
         source_path.join(".git")
@@ -107,7 +113,11 @@ pub fn fetch_local_pack(
     };
 
     let store = RepoObjectStore::open(&git_dir)?;
-    let all_objects = store.collect_all_objects()?;
-    let (pack_bytes, _, _) = write_pack(&all_objects, true)?;
+    let objects = if wants.is_empty() {
+        Vec::new()
+    } else {
+        store.collect_reachable_objects(wants, haves)?
+    };
+    let (pack_bytes, _, _) = write_pack(&objects, true)?;
     Ok(pack_bytes)
 }

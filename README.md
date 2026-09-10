@@ -9,18 +9,18 @@
   ╚═════╝ ╚═╝  ╚═╝╚═╝╚═════╝ ╚═╝╚══════╝╚══════╝
 ```
 
-### **A from-scratch, ultra-fast, daily-driver-capable Git implementation in pure Rust.**
+### **A from-scratch, high-performance Git implementation in pure Rust.**
 
-*100% byte-compatible with official Git repositories, real index formats, real packfiles, and real network protocols.*
+*Bidirectional compatibility with canonical Git repositories, standard index formats, packfiles, and network protocols.*
 
 ---
 
 [![CI Status](https://github.com/braces157/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/braces157/oxidize/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-v0.1.0-orange.svg?logo=rust)](https://github.com/braces157/oxidize/releases)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg?logo=github)](https://braces157.github.io/oxidize/)
-[![Rust Version](https://img.shields.io/badge/rustc-1.80+-blue.svg?logo=rust)](https://www.rust-lang.org)
-[![Git Parity](https://img.shields.io/badge/git%20parity-100%25%20byte--compatible-blueviolet.svg?logo=git)](https://git-scm.com)
-[![Differential Tests](https://img.shields.io/badge/tests-36%2F36%20passed-brightgreen.svg)](#-differential-testing--correctness)
+[![Rust Version](https://img.shields.io/badge/rustc-1.88+-blue.svg?logo=rust)](https://www.rust-lang.org)
+[![Git Compatibility](https://img.shields.io/badge/git%20compatibility-differential%20verified-blueviolet.svg?logo=git)](https://git-scm.com)
+[![Differential Tests](https://img.shields.io/badge/tests-workspace%20passing-brightgreen.svg)](#-differential-testing--correctness)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#-license)
 
 [**Features**](#-key-features) • [**Terminal Showcase**](#-terminal-showcase) • [**Quick Start**](#-quick-start-in-60-seconds) • [**Installation**](#-installation) • [**TUI Dashboard**](#-interactive-terminal-ui-tui) • [**CLI Manual**](docs/CLI_REFERENCE.md) • [**Architecture**](docs/ARCHITECTURE.md) • [**Binary Formats**](docs/FORMATS.md) • [**API Reference**](https://braces157.github.io/oxidize/)
@@ -31,14 +31,14 @@
 
 ## 📖 Overview
 
-**Oxidize (`ox`)** is an independent, production-grade reimplementation of the Git Version Control System crafted from the ground up in memory-safe Rust. It is not a thin wrapper around `git` or `libgit2`—every subsystem, from the SHA-1 object database and binary index parsers to the sliding-window delta compression engine, pkt-line network streaming, and Myers diff algorithm, is implemented natively in pure Rust.
+**Oxidize (`ox`)** is an independent, native reimplementation of the Git Version Control System crafted from the ground up in memory-safe Rust. It is not a wrapper around `git` or `libgit2`—every subsystem, from the SHA-1 object database and binary index parsers to the sliding-window delta compression engine, pkt-line network streaming, and Myers diff algorithm, is implemented natively in pure Rust.
 
-Oxidize is engineered for **seamless bidirectional interoperability**: you can initialize a repository with `git init`, stage files with `ox add`, commit with `ox commit`, push to GitHub with `ox push`, inspect history with `ox ui`, and check out branches interchangeably with official Git.
+Oxidize is engineered for **bidirectional interoperability**: you can initialize a repository with `git init`, stage files with `ox add`, commit with `ox commit`, push to remote with `ox push`, inspect history with `ox ui`, and check out branches interchangeably with official Git.
 
 ```
        Canonical Git Repositories (.git/)
                      ▲
-                     │ 100% Byte-Identical
+                     │ Canonical Formats
                      ▼
   ┌─────────────────────────────────────────────────────┐
   │                   OXIDIZE (`ox`)                    │
@@ -54,15 +54,28 @@ Oxidize is engineered for **seamless bidirectional interoperability**: you can i
 
 | Capability | Description |
 |---|---|
-| 🎯 **100% Byte-for-Byte Git Parity** | Generates identical binary structures: Blobs, Trees, Commits, Tags, Index v2 & v4 (`DIRC`), Packfile v2 (`PACK`), and Pack Index v2 (`.idx`). Tested differentials match C Git bit-for-bit. |
+| 🎯 **Binary Format Compatibility** | Generates canonical Git binary structures: Blobs, Trees, Commits, Tags, Index v2 & v4 (`DIRC`), Packfile v2 (`PACK`), and Pack Index v2 (`.idx`), verified against official Git. |
 | ⚡ **Parallel Multi-Threading (Rayon)** | Parallel filesystem scanning and SHA-1 hashing during `ox add`; multi-threaded sliding delta window compression during `ox gc` / `ox pack-objects`. |
-| 🔒 **Memory-Safe & Zero C Dependencies** | 100% safe Rust object model, zero C/C++ build steps, strict error typing with `thiserror`, and zero `unwrap()` panics in library crates. |
-| 🖥️ **Integrated Interactive TUI (`ox ui`)** | Built-in terminal dashboard powered by **Ratatui** and **Crossterm** for browsing commit graphs, reviewing diffs, and inspecting working tree status without third-party tools. |
-| 🌐 **Smart HTTP & Native SSH Networking** | Native clone, fetch, pull, and push with full Git `pkt-line` protocol framing, capability negotiation, and sideband-64k progress streaming. |
+| 🔒 **Memory-Safe Architecture** | Safe Rust object model, zero C/C++ build steps, strict error typing with `thiserror`, and atomic lockfile transaction primitives (`.lock`). |
+| 🖥️ **Integrated Interactive TUI (`ox ui`)** | Built-in terminal dashboard powered by **Ratatui** and **Crossterm** with non-blocking background operations and RAII terminal restoration. |
+| 🌐 **Smart HTTP & Native SSH Networking** | Native clone, fetch, pull, and push with full Git `pkt-line` protocol framing, capability negotiation, and sideband progress demuxing. |
 | 🔍 **Automatic Exact Rename Detection** | Automatically pairs deleted and added files with identical content in `ox status` and outputs canonical Git rename diff headers (`similarity index 100%`). |
 | ⌨️ **Smart Command Aliases** | Built-in standard shorthands (`st`, `co`, `ci`, `br`, `df`, `rb`, `cp`) plus automatic discovery and execution of custom aliases defined in `.git/config` and global `~/.gitconfig`. |
 | 🐚 **Automated Shell Completions** | Built-in completion script generator for **Bash**, **Zsh**, **Fish**, **PowerShell**, and **Elvish** via `ox completions <shell>`. |
-| 🚀 **Superior Performance** | Up to **35% faster** `status` and **37% faster** `log` traversal than official Git, backed by zero-copy memory-mapped object access (`memmap2`). |
+| 🚀 **High Throughput Operations** | Fast `status` and `log` traversal backed by zero-copy memory-mapped object access (`memmap2`) and stat-cache validation. |
+
+---
+
+## 📋 Compatibility Matrix & Known Limitations
+
+| Subsystem | Supported Features | Current Limitations |
+|---|---|---|
+| **Object Database** | SHA-1 loose objects, Packfile v2 with OFS_DELTA and REF_DELTA, multi-pack object reader | SHA-256 repositories not yet supported; loose object pruning in `gc` requires clean status |
+| **Index Format** | Version 2 and Version 4 (`DIRC`), stat-cache validation, conflict stages 1/2/3 | Split index and sparse index extensions not yet supported |
+| **Working Tree** | Standard repositories, linked worktrees (`commondir`/`gitdir`), bare repositories | Git filters (`smudge`/`clean`), textconv, and `.gitattributes` not yet supported |
+| **Merge & Diff** | 3-way line merge with conflict markers (`MERGE_HEAD`), Myers diff, exact rename detection | Subtree merges, custom merge drivers, and inexact similarity heuristics not yet supported |
+| **Transport** | Smart HTTP (`git-upload-pack`, `git-receive-pack`), native SSH protocol v1 | Protocol v2 is detected and rejected with a descriptive error; credential helpers are WIP |
+| **Configuration** | Multi-valued settings, sections/subsections, aliases, comments, case-insensitive keys | Include directives (`[include]`, `[includeIf]`) not yet evaluated |
 
 ---
 
@@ -221,9 +234,9 @@ ox completions elvish > ~/.elvish/lib/ox.elv
 
 | Feature / Subsystem | Official Git (C) | libgit2 (C) | gitoxide (Rust) | Oxidize (`ox`) |
 |---|:---:|:---:|:---:|:---:|
-| **Language & Safety** | C (Memory-Unsafe) | C (Memory-Unsafe) | Pure Rust | **Pure Rust (100% Safe)** |
-| **Complete CLI Daily Driver** | ✅ | ❌ (Library only) | 🟡 (In progress) | **✅ Fully Functional** |
-| **Object Model (Blob, Tree, Commit, Tag)** | ✅ | ✅ | ✅ | **✅ 100% Byte-Identical** |
+| **Language & Safety** | C (Memory-Unsafe) | C (Memory-Unsafe) | Pure Rust | **Pure Rust (Safe Memory Core)** |
+| **CLI Porcelain Coverage** | ✅ | ❌ (Library only) | 🟡 (In progress) | **✅ Core Porcelain Implemented** |
+| **Object Model (Blob, Tree, Commit, Tag)** | ✅ | ✅ | ✅ | **✅ Canonical Git Formats** |
 | **Binary Index Format v2 & v4 (`DIRC`)** | ✅ | ✅ | ✅ | **✅ Reading & Atomic Writing** |
 | **Packfile v2 & Base-128 OFS_DELTA** | ✅ | ✅ | ✅ | **✅ Parallel Sliding Window** |
 | **Zero-Copy Memory-Mapped Access** | ✅ | ❌ | ✅ | **✅ `memmap2` Integration** |
@@ -234,13 +247,19 @@ ox completions elvish > ~/.elvish/lib/ox.elv
 | **Smart HTTP & Native SSH Networking** | ✅ | 🟡 (HTTP only) | 🟡 (HTTP/SSH WIP) | **✅ Streaming HTTP & SSH** |
 | **Integrated Interactive TUI** | ❌ (Needs `tig`/`lazygit`) | ❌ | ❌ | **✅ Built-in `ox ui` (Ratatui)** |
 | **3-Way Line Merge with Conflict Markers** | ✅ | ✅ | 🟡 | **✅ LCA Base + Line Merge** |
-| **Blame, Reflog, Bisect, Stash, Rebase** | ✅ | 🟡 | ❌ | **✅ Fully Supported** |
+| **Blame, Reflog, Bisect, Stash, Rebase** | ✅ | 🟡 | ❌ | **✅ Core Workflows Supported** |
 
 ---
 
 ## ⚡ Performance Benchmarks
 
-Benchmarks were performed on identical repositories using our automated differential benchmark harness (`tests/performance_benchmark_test.rs`) comparing `ox` release builds directly against official `git` (v2.46+):
+Benchmarks were performed using our automated differential benchmark harness (`tests/performance_benchmark_test.rs`) comparing `ox` release builds directly against official `git` (v2.46+).
+
+**Environment & Methodology:**
+- **OS & Architecture:** Windows 11 x86_64 / Linux x86_64
+- **Toolchain:** Rust 1.88+ (`cargo build --release`), official Git 2.46+
+- **Datasets:** Synthetic test repositories with 50–200 objects, 5 repetitions with warm filesystem cache
+- **Measurement:** Process wall-clock execution time; object tree integrity verified via `git fsck --full` and `git verify-pack`
 
 | Operation | Workload / Dataset | Official Git (C) | Oxidize (`ox`) | Delta / Speedup |
 |---|---|:---:|:---:|:---:|
@@ -249,7 +268,7 @@ Benchmarks were performed on identical repositories using our automated differen
 | **`add` throughput** | 200 loose files (0.77 MB parallel hashing) | 512.3 ms | **485.9 ms** | ⚡ **1.58 MB/s concurrent** |
 | **`gc` pack generation** | Loose objects -> packfile + .idx v2 | 125.6 ms | **107.2 ms** | ⚡ **1.52x compression** |
 
-> Packfiles and indices generated by `ox gc` were subsequently verified for strict validity using official `git verify-pack -v` and `git fsck --full`, confirming 100% structural parity.
+> *Note:* Benchmark figures reflect smoke-test timings on local SSD storage under warm-cache conditions. Performance in production environments depends on disk I/O, repository scale, and filesystem concurrency. Packfiles and indices generated by `ox gc` are verified for strict validity using official `git verify-pack -v` and `git fsck --full`.
 
 ---
 
@@ -633,9 +652,9 @@ Every packet in Git transport framing is length-prefixed with 4 hexadecimal ASCI
 
 ## 🔒 Security & Memory Safety
 
-- **100% Safe Memory Foundation**: Zero unsafe pointer manipulation in library crates. Memory mapping through `memmap2` is securely encapsulated behind the safe `ObjectReader` trait.
+- **Safe Memory Foundation**: Zero unsafe pointer manipulation in library crates. Memory mapping through `memmap2` is securely encapsulated behind the safe `ObjectReader` trait.
 - **Denial-of-Service Defense**: Rigorous packet length boundary validation in `pkt-line` parsing protects against memory overflow attacks.
-- **Crash Consistency & Atomic Locks**: Staging updates use `.git/index.lock` with atomic file renaming; reference updates use `<ref>.lock`. An unexpected system crash or interrupt will never leave repository state corrupted.
+- **Crash Consistency & Atomic Locks**: Staging updates use `.git/index.lock` with atomic file renaming; reference updates use `<ref>.lock`. In-flight mutations are isolated to prevent corrupting repository state during unexpected interrupts.
 
 ---
 
@@ -650,7 +669,7 @@ Every packet in Git transport framing is length-prefixed with 4 hexadecimal ASCI
 <details>
 <summary><b>Does Oxidize require Git to be installed on my computer?</b></summary>
 <br>
-<b>No.</b> Oxidize is a completely standalone executable with zero runtime dependencies. Official Git is only used as a reference oracle in our automated differential integration test suite.
+<b>No.</b> Core repository management, staging, commit, diff, packfile generation, TUI, and smart HTTP transport are implemented in pure native Rust without invoking Git. Official Git is only used as a reference oracle in our automated differential test suite.
 </details>
 
 <details>

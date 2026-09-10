@@ -47,6 +47,8 @@ pub struct RepoStatus {
     pub unstaged: Vec<UnstagedChange>,
     /// Untracked files in working tree.
     pub untracked: Vec<String>,
+    /// Unmerged paths with conflict stages (1, 2, 3).
+    pub unmerged: Vec<String>,
 }
 
 /// Recursively flattens a Tree object into a map of `relative_path -> (mode, oid)`.
@@ -68,6 +70,7 @@ pub fn flatten_tree(
         } else {
             format!("{}/{}", prefix, entry.name)
         };
+        oxidize_core::validate_repo_path(&path).map_err(IndexError::Core)?;
 
         if entry.mode.is_tree() {
             let submap = flatten_tree(store, &entry.id, &path)?;
@@ -100,25 +103,34 @@ pub fn compute_status_with_ignore(
         BTreeMap::new()
     };
 
-    // Index entries mapped by path
-    let index_map: BTreeMap<String, &crate::entry::IndexEntry> = index
-        .entries()
-        .iter()
-        .map(|e| (e.path.clone(), e))
-        .collect();
+    // Separate unmerged conflict stages (stage > 0) from normal staged entries (stage == 0)
+    let mut unmerged_paths = BTreeSet::new();
+    let mut stage0_entries: BTreeMap<String, &crate::entry::IndexEntry> = BTreeMap::new();
+
+    for e in index.entries() {
+        if e.stage > 0 {
+            unmerged_paths.insert(e.path.clone());
+        } else {
+            stage0_entries.insert(e.path.clone(), e);
+        }
+    }
+    // Remove any path from stage0_entries that also has unmerged stages
+    for p in &unmerged_paths {
+        stage0_entries.remove(p);
+    }
 
     // Collect candidates for staged changes
     let mut staged_new: Vec<(String, ObjectId)> = Vec::new();
     let mut staged_modified: Vec<String> = Vec::new();
     let mut staged_deleted: Vec<(String, ObjectId)> = Vec::new();
 
-    for (path, entry) in &index_map {
+    for (path, entry) in &stage0_entries {
         match head_entries.get(path) {
             None => {
                 staged_new.push((path.clone(), entry.oid));
             }
-            Some((_mode, head_oid)) => {
-                if &entry.oid != head_oid {
+            Some((head_mode, head_oid)) => {
+                if &entry.oid != head_oid || entry.mode != head_mode.0 {
                     staged_modified.push(path.clone());
                 }
             }
@@ -126,27 +138,35 @@ pub fn compute_status_with_ignore(
     }
 
     for (path, (_mode, head_oid)) in &head_entries {
-        if !index_map.contains_key(path) {
+        if !stage0_entries.contains_key(path) && !unmerged_paths.contains(path) {
             staged_deleted.push((path.clone(), *head_oid));
         }
     }
 
     // Exact rename detection: match identical ObjectIds between staged_deleted and staged_new
+    // Using an OID-indexed map avoids quadratic O(N*M) scanning on bulk renames.
+    let mut deleted_by_oid: std::collections::HashMap<ObjectId, Vec<(usize, String)>> =
+        std::collections::HashMap::new();
+    for (idx, (del_path, del_oid)) in staged_deleted.iter().enumerate().rev() {
+        deleted_by_oid
+            .entry(*del_oid)
+            .or_default()
+            .push((idx, del_path.clone()));
+    }
+
     let mut matched_deleted = std::collections::HashSet::new();
     let mut matched_new = std::collections::HashSet::new();
 
     for (new_idx, (new_path, new_oid)) in staged_new.iter().enumerate() {
-        if let Some((del_idx, (del_path, _))) = staged_deleted
-            .iter()
-            .enumerate()
-            .find(|(i, (_del_path, del_oid))| !matched_deleted.contains(i) && del_oid == new_oid)
-        {
-            matched_deleted.insert(del_idx);
-            matched_new.insert(new_idx);
-            status.staged.push(StagedChange::Renamed {
-                from: del_path.clone(),
-                to: new_path.clone(),
-            });
+        if let Some(candidates) = deleted_by_oid.get_mut(new_oid) {
+            if let Some((del_idx, del_path)) = candidates.pop() {
+                matched_deleted.insert(del_idx);
+                matched_new.insert(new_idx);
+                status.staged.push(StagedChange::Renamed {
+                    from: del_path,
+                    to: new_path.clone(),
+                });
+            }
         }
     }
 
@@ -179,57 +199,92 @@ pub fn compute_status_with_ignore(
     });
 
     // 2. Unstaged changes: compare working tree with index in parallel with Rayon
-    let mut unstaged: Vec<UnstagedChange> = index
-        .entries()
-        .par_iter()
+    let stage0_list: Vec<&crate::entry::IndexEntry> = stage0_entries.values().copied().collect();
+    let mut unstaged: Vec<UnstagedChange> = stage0_list
+        .into_par_iter()
         .filter_map(|entry| {
             let full_path = repo_root.join(&entry.path);
-            if !full_path.exists() {
-                Some(UnstagedChange::Deleted(entry.path.clone()))
-            } else if let Ok(meta) = fs::metadata(&full_path) {
-                let size = meta.len() as u32;
-                let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                let duration = mtime
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default();
-                let mtime_sec = duration.as_secs() as u32;
-                let mtime_nsec = duration.subsec_nanos();
+            let meta = match fs::symlink_metadata(&full_path) {
+                Ok(m) => m,
+                Err(err) => {
+                    if err.kind() == std::io::ErrorKind::NotFound {
+                        return Some(UnstagedChange::Deleted(entry.path.clone()));
+                    } else {
+                        // Stat/permission error: surface as modified rather than silently clean
+                        return Some(UnstagedChange::Modified(entry.path.clone()));
+                    }
+                }
+            };
 
-                // Fast stat cache check: if size matches AND mtime matches, file is untouched!
-                if size == entry.file_size
-                    && entry.mtime_sec != 0
-                    && entry.mtime_sec == mtime_sec
-                    && entry.mtime_nsec == mtime_nsec
-                {
-                    None
-                } else if size != entry.file_size {
-                    Some(UnstagedChange::Modified(entry.path.clone()))
+            let size = meta.len() as u32;
+            let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let duration = mtime
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default();
+            let mtime_sec = duration.as_secs() as u32;
+            let mtime_nsec = duration.subsec_nanos();
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let is_exec = (meta.permissions().mode() & 0o111) != 0;
+                let is_symlink = meta.file_type().is_symlink();
+                let file_mode = if is_symlink {
+                    0o120000
+                } else if is_exec {
+                    0o100755
                 } else {
-                    // Size is equal but mtime changed. Hash to confirm actual content changes.
-                    if let Ok(data) = fs::read(&full_path) {
+                    0o100644
+                };
+                if file_mode != entry.mode {
+                    return Some(UnstagedChange::Modified(entry.path.clone()));
+                }
+            }
+
+            // Stat cache check:
+            if size != entry.file_size {
+                Some(UnstagedChange::Modified(entry.path.clone()))
+            } else if entry.mtime_sec != 0
+                && entry.mtime_sec == mtime_sec
+                && entry.mtime_nsec == mtime_nsec
+            {
+                None
+            } else {
+                // Size matches but mtime changed (or mtime is 0). Hash to confirm actual content changes.
+                match fs::read(&full_path) {
+                    Ok(data) => {
                         let blob = Object::Blob(oxidize_core::object::Blob::new(data));
                         if blob.id() != entry.oid {
-                            return Some(UnstagedChange::Modified(entry.path.clone()));
+                            Some(UnstagedChange::Modified(entry.path.clone()))
+                        } else {
+                            None
                         }
                     }
-                    None
+                    Err(_) => Some(UnstagedChange::Modified(entry.path.clone())),
                 }
-            } else {
-                None
             }
         })
         .collect();
-    unstaged.sort_by(|a, b| match (a, b) {
-        (UnstagedChange::Modified(p1), UnstagedChange::Modified(p2)) => p1.cmp(p2),
-        (UnstagedChange::Deleted(p1), UnstagedChange::Deleted(p2)) => p1.cmp(p2),
-        (UnstagedChange::Modified(p1), UnstagedChange::Deleted(p2)) => p1.cmp(p2),
-        (UnstagedChange::Deleted(p1), UnstagedChange::Modified(p2)) => p1.cmp(p2),
+    unstaged.sort_by(|a, b| {
+        let p_a = match a {
+            UnstagedChange::Modified(p) | UnstagedChange::Deleted(p) => p,
+        };
+        let p_b = match b {
+            UnstagedChange::Modified(p) | UnstagedChange::Deleted(p) => p,
+        };
+        p_a.cmp(p_b)
     });
     status.unstaged = unstaged;
 
-    // 3. Untracked files: scan working directory
+    // 3. Unmerged paths
+    status.unmerged = unmerged_paths.iter().cloned().collect();
+
+    // 4. Untracked files: scan working directory
     let mut tracked_or_ignored = BTreeSet::new();
-    for path in index_map.keys() {
+    for path in stage0_entries.keys() {
+        tracked_or_ignored.insert(path.clone());
+    }
+    for path in &unmerged_paths {
         tracked_or_ignored.insert(path.clone());
     }
 
@@ -299,7 +354,7 @@ fn scan_untracked(
                 .is_some_and(|s| s.starts_with(&dir_prefix));
             if has_tracked {
                 scan_untracked(root, &path, tracked, untracked, is_ignored)?;
-            } else {
+            } else if dir_has_any_unignored_files(root, &path, is_ignored) {
                 // Whole directory is untracked
                 untracked.push(format!("{}/", rel_path));
             }
@@ -309,6 +364,38 @@ fn scan_untracked(
     }
 
     Ok(())
+}
+
+fn dir_has_any_unignored_files(root: &Path, dir: &Path, is_ignored: Option<IgnoreFilter>) -> bool {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if name.to_string_lossy() == ".git" {
+            continue;
+        }
+        let rel_path = match path.strip_prefix(root) {
+            Ok(p) => p.to_string_lossy().replace('\\', "/"),
+            Err(_) => continue,
+        };
+        let is_dir = path.is_dir();
+        if let Some(check_ignore) = is_ignored {
+            if check_ignore(&rel_path, is_dir) {
+                continue;
+            }
+        }
+        if is_dir {
+            if dir_has_any_unignored_files(root, &path, is_ignored) {
+                return true;
+            }
+        } else {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -366,5 +453,87 @@ mod tests {
                 to: "new_name.txt".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn test_status_mode_change() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_root = temp_dir.path();
+        let objects_dir = repo_root.join(".git").join("objects");
+        let store = LooseObjectStore::new(&objects_dir);
+
+        let blob = Blob::new(b"script".to_vec());
+        let blob_id = store.write_object(&Object::Blob(blob)).unwrap();
+
+        // HEAD tree has script.sh as 100644 regular file
+        let tree = Tree::new(vec![TreeEntry {
+            mode: FileMode::REGULAR,
+            name: "script.sh".to_string(),
+            id: blob_id,
+        }]);
+        let tree_id = store.write_object(&Object::Tree(tree)).unwrap();
+
+        // Index has script.sh with identical blob_id, but mode 100755 (chmod +x)
+        let mut index = Index::new();
+        index.add_entry(crate::entry::IndexEntry {
+            ctime_sec: 100,
+            ctime_nsec: 100,
+            mtime_sec: 100,
+            mtime_nsec: 100,
+            dev: 0,
+            ino: 0,
+            mode: 0o100755,
+            uid: 0,
+            gid: 0,
+            file_size: 6,
+            oid: blob_id,
+            stage: 0,
+            assume_valid: false,
+            path: "script.sh".to_string(),
+        });
+
+        std::fs::write(repo_root.join("script.sh"), b"script").unwrap();
+
+        let status = compute_status(repo_root, &index, Some(&tree_id), &store).unwrap();
+        assert_eq!(
+            status.staged,
+            vec![StagedChange::Modified("script.sh".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_status_unmerged_paths() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_root = temp_dir.path();
+        let objects_dir = repo_root.join(".git").join("objects");
+        let store = LooseObjectStore::new(&objects_dir);
+
+        let mut index = Index::new();
+        // Add conflict stages 1, 2, 3 for conflict.txt
+        for stage in 1..=3 {
+            index.add_entry(crate::entry::IndexEntry {
+                ctime_sec: 100,
+                ctime_nsec: 100,
+                mtime_sec: 100,
+                mtime_nsec: 100,
+                dev: 0,
+                ino: 0,
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                file_size: 10,
+                oid: ObjectId::from_bytes([0x11; 20]),
+                stage,
+                assume_valid: false,
+                path: "conflict.txt".to_string(),
+            });
+        }
+
+        std::fs::write(repo_root.join("conflict.txt"), b"conflict").unwrap();
+
+        let status = compute_status(repo_root, &index, None, &store).unwrap();
+        assert_eq!(status.unmerged, vec!["conflict.txt".to_string()]);
+        assert!(status.staged.is_empty());
+        assert!(status.untracked.is_empty());
     }
 }

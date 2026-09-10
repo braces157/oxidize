@@ -1,0 +1,8 @@
+
+thread 'main' (13808) panicked at crates\pack\src\delta.rs:37:27:
+index out of bounds: the len is 3 but the index is 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+truncated_delta_panics=true
+demux_pack_bytes=[78, 65, 75, 10, 80, 65, 67, 75]
+truncated_prefix_accepted=true
+ssh_absolute_path="absolute/repo.git"

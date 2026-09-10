@@ -301,9 +301,21 @@ pub fn write_pack(
     Ok((payload, indexed_objects, pack_checksum))
 }
 
+/// Maximum allowed delta depth to prevent stack overflow on deep or recursive delta chains.
+pub const MAX_DELTA_DEPTH: usize = 64;
+
+/// Maximum allowed decompressed object size (512 MiB).
+pub const MAX_DECOMPRESSED_OBJECT_SIZE: usize = 512 * 1024 * 1024;
+
 /// Decompresses a zlib stream of known uncompressed size.
 /// Returns `(decompressed_data, compressed_bytes_consumed)`.
 fn decompress_zlib(input: &[u8], expected_size: usize) -> Result<(Vec<u8>, usize), PackError> {
+    if expected_size > MAX_DECOMPRESSED_OBJECT_SIZE {
+        return Err(PackError::DeltaError(format!(
+            "declared object size {} exceeds maximum allowed limit {}",
+            expected_size, MAX_DECOMPRESSED_OBJECT_SIZE
+        )));
+    }
     let mut decompress = flate2::Decompress::new(true);
     let mut out = vec![0u8; expected_size];
     let mut out_pos = 0;
@@ -330,6 +342,20 @@ fn decompress_zlib(input: &[u8], expected_size: usize) -> Result<(Vec<u8>, usize
         if in_before == decompress.total_in() as usize && out_produced == 0 {
             return Err(PackError::DeltaError("zlib decompress stalled".to_string()));
         }
+
+        if out_pos >= expected_size && status != flate2::Status::StreamEnd {
+            return Err(PackError::DeltaError(format!(
+                "zlib stream produced more bytes than declared size {}",
+                expected_size
+            )));
+        }
+    }
+
+    if out_pos != expected_size {
+        return Err(PackError::DeltaError(format!(
+            "decompressed size mismatch: expected {}, got {}",
+            expected_size, out_pos
+        )));
     }
 
     out.truncate(out_pos);
@@ -346,6 +372,31 @@ pub fn read_pack_object_at(
     offset: u64,
     base_resolver: Option<BaseResolver<'_>>,
 ) -> Result<(ObjectType, Vec<u8>, usize, u32), PackError> {
+    let mut visited_offsets = std::collections::HashSet::new();
+    read_pack_object_at_depth(pack_data, offset, base_resolver, 0, &mut visited_offsets)
+}
+
+/// Reads and resolves a single object from a packfile with delta recursion limits and cycle detection.
+pub fn read_pack_object_at_depth(
+    pack_data: &[u8],
+    offset: u64,
+    base_resolver: Option<BaseResolver<'_>>,
+    depth: usize,
+    visited_offsets: &mut std::collections::HashSet<u64>,
+) -> Result<(ObjectType, Vec<u8>, usize, u32), PackError> {
+    if depth > MAX_DELTA_DEPTH {
+        return Err(PackError::DeltaError(format!(
+            "delta depth exceeded maximum limit ({})",
+            MAX_DELTA_DEPTH
+        )));
+    }
+    if !visited_offsets.insert(offset) {
+        return Err(PackError::DeltaError(format!(
+            "cyclical delta chain detected at offset {}",
+            offset
+        )));
+    }
+
     let start = offset as usize;
     if start >= pack_data.len() {
         return Err(PackError::InvalidPackSignature);
@@ -358,9 +409,19 @@ pub fn read_pack_object_at(
         OBJ_OFS_DELTA => {
             let (ofs, delta_ofs_len) = decode_offset_delta(pack_data, cursor)?;
             cursor += delta_ofs_len;
+            if ofs == 0 {
+                return Err(PackError::DeltaError(
+                    "offset delta ofs cannot be 0".to_string(),
+                ));
+            }
             let base_offset = offset
                 .checked_sub(ofs)
                 .ok_or(PackError::InvalidPackSignature)?;
+            if base_offset >= offset {
+                return Err(PackError::DeltaError(
+                    "offset delta base offset must precede current offset".to_string(),
+                ));
+            }
 
             let (delta_data, consumed) = decompress_zlib(&pack_data[cursor..], uncompressed_size)?;
             cursor += consumed;
@@ -370,8 +431,13 @@ pub fn read_pack_object_at(
             crc.update(&pack_data[start..cursor]);
             let crc32 = crc.sum();
 
-            let (base_type, base_data, _, _) =
-                read_pack_object_at(pack_data, base_offset, base_resolver)?;
+            let (base_type, base_data, _, _) = read_pack_object_at_depth(
+                pack_data,
+                base_offset,
+                base_resolver,
+                depth + 1,
+                visited_offsets,
+            )?;
             let reconstructed = apply_delta(&base_data, &delta_data)?;
 
             Ok((base_type, reconstructed, packed_len, crc32))

@@ -18,6 +18,19 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Result of an asynchronous background operation.
+#[derive(Debug)]
+pub enum BackgroundJobResult {
+    Success(String),
+    Error(String),
+}
+
+/// Active background task handle.
+pub struct BackgroundJob {
+    pub description: String,
+    pub receiver: std::sync::mpsc::Receiver<BackgroundJobResult>,
+}
+
 /// Core state machine for the multi-panel interactive TUI.
 pub struct App {
     /// Root directory of the repository working tree.
@@ -86,6 +99,9 @@ pub struct App {
     /// Flag indicating whether the application should terminate.
     pub should_quit: bool,
 
+    /// Active background task executing non-blocking operations.
+    pub active_job: Option<BackgroundJob>,
+
     // Backwards compatibility fields
     /// Legacy tab mode for compatibility with earlier dashboards.
     pub active_tab: TabMode,
@@ -132,6 +148,7 @@ impl App {
             active_modal: ActiveModal::None,
             status_message: None,
             should_quit: false,
+            active_job: None,
             active_tab: TabMode::Commits,
             status_lines: Vec::new(),
             selected_index: 0,
@@ -140,15 +157,36 @@ impl App {
 
     /// Loads repository data from disk into the multi-panel state.
     pub fn load_repository(&mut self, git_dir: &Path) -> Result<(), TuiError> {
-        self.git_dir = git_dir.to_path_buf();
-        self.repo_root = git_dir
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| git_dir.to_path_buf());
+        let ctx = match oxidize_core::RepoContext::discover(git_dir) {
+            Ok(c) => c,
+            Err(_) => {
+                let repo_root = git_dir
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| git_dir.to_path_buf());
+                oxidize_core::RepoContext {
+                    worktree: Some(repo_root),
+                    git_dir: git_dir.to_path_buf(),
+                    common_dir: git_dir.to_path_buf(),
+                    is_bare: false,
+                }
+            }
+        };
+        self.git_dir = ctx.git_dir.clone();
+        self.repo_root = ctx.worktree.unwrap_or_else(|| {
+            if !ctx.is_bare && git_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
+                git_dir
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| self.git_dir.clone())
+            } else {
+                self.git_dir.clone()
+            }
+        });
 
         let store =
-            RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
-        let ref_store = RefStore::new(git_dir);
+            RepoObjectStore::open(&self.git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
+        let ref_store = RefStore::new(&self.git_dir);
 
         // 1. Resolve HEAD branch and commit
         let (branch, head_oid_opt) = ref_store
@@ -266,6 +304,13 @@ impl App {
                     kind: FileStatusKind::Untracked,
                 });
             }
+            for unmerged in &status.unmerged {
+                self.files.push(FileItem {
+                    path: unmerged.clone(),
+                    old_path: None,
+                    kind: FileStatusKind::Conflicted,
+                });
+            }
 
             // Sync legacy status lines
             for f in &self.files {
@@ -295,11 +340,39 @@ impl App {
         Ok(())
     }
 
-    /// Reloads repository data in place while preserving selection indices.
+    /// Reloads repository data in place while preserving active selection identifiers.
     pub fn refresh(&mut self) -> Result<(), TuiError> {
         let git_dir = self.git_dir.clone();
         if !git_dir.as_os_str().is_empty() {
+            let sel_file = self.selected_file().map(|f| f.path.clone());
+            let sel_branch = self.selected_branch().map(|b| b.name.clone());
+            let sel_commit = self.selected_commit().map(|c| c.oid);
+            let sel_stash = self.selected_stash().map(|s| s.index);
+
             self.load_repository(&git_dir)?;
+
+            if let Some(path) = sel_file {
+                if let Some(pos) = self.files.iter().position(|f| f.path == path) {
+                    self.files_selected = pos;
+                }
+            }
+            if let Some(name) = sel_branch {
+                if let Some(pos) = self.branches.iter().position(|b| b.name == name) {
+                    self.branches_selected = pos;
+                }
+            }
+            if let Some(oid) = sel_commit {
+                if let Some(pos) = self.commits.iter().position(|c| c.oid == oid) {
+                    self.commits_selected = pos;
+                }
+            }
+            if let Some(idx) = sel_stash {
+                if let Some(pos) = self.stashes.iter().position(|s| s.index == idx) {
+                    self.stashes_selected = pos;
+                }
+            }
+            self.clamp_selections();
+            self.update_inspector();
         }
         Ok(())
     }
@@ -1123,6 +1196,10 @@ impl App {
                 let worktree = read_worktree_file(&self.repo_root, &file.path);
                 format_unified_diff(&file.path, &file.path, "", &worktree, 3)
             }
+            FileStatusKind::Conflicted => {
+                let worktree = read_worktree_file(&self.repo_root, &file.path);
+                format_unified_diff(&file.path, &file.path, "", &worktree, 3)
+            }
         };
 
         if let Some(text) = diff_text {
@@ -1403,6 +1480,18 @@ impl App {
 
     /// Appends or inserts a character at the modal cursor.
     pub fn handle_modal_char(&mut self, c: char) {
+        let update_text = |text: &mut String, cursor: &mut usize| {
+            let char_count = text.chars().count();
+            let safe_cursor = (*cursor).min(char_count);
+            let byte_offset = text
+                .char_indices()
+                .nth(safe_cursor)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
+            text.insert(byte_offset, c);
+            *cursor = safe_cursor + 1;
+        };
+
         match self.active_modal {
             ActiveModal::CommitPrompt {
                 ref mut message,
@@ -1415,16 +1504,14 @@ impl App {
             | ActiveModal::StashSave {
                 ref mut message,
                 ref mut cursor,
-            } if *cursor <= message.len() => {
-                message.insert(*cursor, c);
-                *cursor += 1;
+            } => {
+                update_text(message, cursor);
             }
             ActiveModal::BranchCreate {
                 ref mut name,
                 ref mut cursor,
-            } if *cursor <= name.len() => {
-                name.insert(*cursor, c);
-                *cursor += 1;
+            } => {
+                update_text(name, cursor);
             }
             _ => {}
         }
@@ -1432,6 +1519,18 @@ impl App {
 
     /// Handles Backspace key inside an active modal text field.
     pub fn handle_modal_backspace(&mut self) {
+        let backspace_text = |text: &mut String, cursor: &mut usize| {
+            let char_count = text.chars().count();
+            let safe_cursor = (*cursor).min(char_count);
+            if safe_cursor > 0 {
+                let target_idx = safe_cursor - 1;
+                if let Some((byte_offset, _)) = text.char_indices().nth(target_idx) {
+                    text.remove(byte_offset);
+                    *cursor = target_idx;
+                }
+            }
+        };
+
         match self.active_modal {
             ActiveModal::CommitPrompt {
                 ref mut message,
@@ -1444,16 +1543,14 @@ impl App {
             | ActiveModal::StashSave {
                 ref mut message,
                 ref mut cursor,
-            } if *cursor > 0 && *cursor <= message.len() => {
-                message.remove(*cursor - 1);
-                *cursor -= 1;
+            } => {
+                backspace_text(message, cursor);
             }
             ActiveModal::BranchCreate {
                 ref mut name,
                 ref mut cursor,
-            } if *cursor > 0 && *cursor <= name.len() => {
-                name.remove(*cursor - 1);
-                *cursor -= 1;
+            } => {
+                backspace_text(name, cursor);
             }
             _ => {}
         }
@@ -1465,10 +1562,8 @@ impl App {
             ActiveModal::CommitPrompt { ref mut cursor, .. }
             | ActiveModal::CommitAmend { ref mut cursor, .. }
             | ActiveModal::StashSave { ref mut cursor, .. }
-            | ActiveModal::BranchCreate { ref mut cursor, .. }
-                if *cursor > 0 =>
-            {
-                *cursor -= 1;
+            | ActiveModal::BranchCreate { ref mut cursor, .. } => {
+                *cursor = cursor.saturating_sub(1);
             }
             _ => {}
         }
@@ -1476,6 +1571,13 @@ impl App {
 
     /// Moves text cursor right inside an active modal.
     pub fn handle_modal_right(&mut self) {
+        let advance = |text: &str, cursor: &mut usize| {
+            let char_count = text.chars().count();
+            if *cursor < char_count {
+                *cursor += 1;
+            }
+        };
+
         match self.active_modal {
             ActiveModal::CommitPrompt {
                 ref message,
@@ -1488,14 +1590,14 @@ impl App {
             | ActiveModal::StashSave {
                 ref message,
                 ref mut cursor,
-            } if *cursor < message.len() => {
-                *cursor += 1;
+            } => {
+                advance(message, cursor);
             }
             ActiveModal::BranchCreate {
                 ref name,
                 ref mut cursor,
-            } if *cursor < name.len() => {
-                *cursor += 1;
+            } => {
+                advance(name, cursor);
             }
             _ => {}
         }
@@ -1520,6 +1622,8 @@ impl App {
                 ));
                 self.active_modal = ActiveModal::None;
                 self.refresh()?;
+                self.commits_selected = 0;
+                self.update_inspector();
             }
             ActiveModal::CommitAmend { message, .. } => {
                 let trimmed = message.trim();
@@ -1534,6 +1638,8 @@ impl App {
                 self.status_message = Some(format!("✓ Amended commit [{}] {}", short_sha, trimmed));
                 self.active_modal = ActiveModal::None;
                 self.refresh()?;
+                self.commits_selected = 0;
+                self.update_inspector();
             }
             ActiveModal::BranchCreate { name, .. } => {
                 let trimmed = name.trim();
@@ -1571,7 +1677,7 @@ impl App {
     pub fn open_amend_modal(&mut self) {
         if let Some(last_commit) = self.commits.first() {
             let msg = last_commit.full_message.trim().to_string();
-            let len = msg.len();
+            let len = msg.chars().count();
             self.active_modal = ActiveModal::CommitAmend {
                 message: msg,
                 cursor: len,
@@ -1652,9 +1758,15 @@ impl App {
                 return Ok(());
             }
 
-            ops::delete_branch(&self.git_dir, &b.name)?;
-            self.status_message = Some(format!("✓ Deleted branch '{}'", b.name));
-            self.refresh()?;
+            match ops::delete_branch(&self.git_dir, &b.name, false) {
+                Ok(()) => {
+                    self.status_message = Some(format!("✓ Deleted branch '{}'", b.name));
+                    self.refresh()?;
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("✗ Cannot delete branch: {}", e));
+                }
+            }
         }
         Ok(())
     }
@@ -1665,8 +1777,15 @@ impl App {
             return Ok(());
         }
         if let Some(s) = self.selected_stash().cloned() {
-            ops::pop_stash(&self.repo_root, &self.git_dir, &s.oid)?;
-            self.status_message = Some(format!("✓ Popped stash@{{{}}}", s.index));
+            let clean = ops::pop_stash(&self.repo_root, &self.git_dir, s.index, &s.oid)?;
+            if clean {
+                self.status_message = Some(format!("✓ Popped stash@{{{}}}", s.index));
+            } else {
+                self.status_message = Some(format!(
+                    "⚠ Conflict popping stash@{{{}}}, stash kept",
+                    s.index
+                ));
+            }
             self.refresh()?;
         }
         Ok(())
@@ -1678,82 +1797,97 @@ impl App {
             return Ok(());
         }
         if let Some(s) = self.selected_stash().cloned() {
-            ops::drop_stash(&self.git_dir)?;
+            ops::drop_stash(&self.git_dir, s.index)?;
             self.status_message = Some(format!("✓ Dropped stash@{{{}}}", s.index));
             self.refresh()?;
         }
         Ok(())
     }
 
-    /// Pushes commits to remote repository (bound to 'P').
+    /// Pushes commits to remote repository in a non-blocking background task (bound to 'P').
     pub fn push(&mut self) -> Result<(), TuiError> {
-        self.status_message = Some("Pushing commits to remote...".to_string());
-        let mut cmd = std::process::Command::new("git");
-        cmd.args(["push"]).current_dir(&self.repo_root);
-        let output = cmd.output().or_else(|_| {
-            std::process::Command::new("ox")
-                .args(["push"])
-                .current_dir(&self.repo_root)
-                .output()
+        if self.active_job.is_some() {
+            self.status_message =
+                Some("⚠ A repository operation is already in progress".to_string());
+            return Ok(());
+        }
+
+        let repo_root = self.repo_root.clone();
+        let git_dir = self.git_dir.clone();
+        let branch = self.branch_name.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        self.status_message = Some(format!("Pushing branch '{}' to remote...", branch));
+
+        let branch_for_thread = branch.clone();
+        std::thread::spawn(move || {
+            let res =
+                ops::push_to_remote(&repo_root, &git_dir, None, Some(&branch_for_thread), false);
+            let job_res = match res {
+                Ok(msg) => BackgroundJobResult::Success(msg),
+                Err(e) => BackgroundJobResult::Error(e.to_string()),
+            };
+            let _ = tx.send(job_res);
         });
 
-        match output {
-            Ok(out) if out.status.success() => {
-                let msg = String::from_utf8_lossy(&out.stderr);
-                let first_line = msg
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("Pushed to remote");
-                self.status_message = Some(format!("✓ {}", first_line));
-                let _ = self.refresh();
-            }
-            Ok(out) => {
-                let err = String::from_utf8_lossy(&out.stderr);
-                let err_first = err
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("Push failed");
-                self.status_message = Some(format!("✗ Push failed: {}", err_first));
-            }
-            Err(e) => {
-                self.status_message = Some(format!("✗ Push error: {}", e));
-            }
-        }
+        self.active_job = Some(BackgroundJob {
+            description: format!("Push {}", branch),
+            receiver: rx,
+        });
         Ok(())
     }
 
-    /// Pulls latest commits from remote repository (bound to 'p').
+    /// Pulls latest commits from remote repository in a non-blocking background task (bound to 'p').
     pub fn pull(&mut self) -> Result<(), TuiError> {
+        if self.active_job.is_some() {
+            self.status_message =
+                Some("⚠ A repository operation is already in progress".to_string());
+            return Ok(());
+        }
+
+        let repo_root = self.repo_root.clone();
+        let git_dir = self.git_dir.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+
         self.status_message = Some("Pulling from remote...".to_string());
-        let mut cmd = std::process::Command::new("git");
-        cmd.args(["pull"]).current_dir(&self.repo_root);
-        let output = cmd.output().or_else(|_| {
-            std::process::Command::new("ox")
-                .args(["pull"])
-                .current_dir(&self.repo_root)
-                .output()
+
+        std::thread::spawn(move || {
+            let res = ops::pull_from_remote(&repo_root, &git_dir, None, None);
+            let job_res = match res {
+                Ok(msg) => BackgroundJobResult::Success(msg),
+                Err(e) => BackgroundJobResult::Error(e.to_string()),
+            };
+            let _ = tx.send(job_res);
         });
 
-        match output {
-            Ok(out) if out.status.success() => {
-                let msg = String::from_utf8_lossy(&out.stdout);
-                let first_line = msg
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("Pulled from remote");
-                self.status_message = Some(format!("✓ {}", first_line));
-                let _ = self.refresh();
-            }
-            Ok(out) => {
-                let err = String::from_utf8_lossy(&out.stderr);
-                let err_first = err
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("Pull failed");
-                self.status_message = Some(format!("✗ Pull failed: {}", err_first));
-            }
-            Err(e) => {
-                self.status_message = Some(format!("✗ Pull error: {}", e));
+        self.active_job = Some(BackgroundJob {
+            description: "Pull".to_string(),
+            receiver: rx,
+        });
+        Ok(())
+    }
+
+    /// Ticks the background event loop, processing any completed asynchronous jobs.
+    pub fn tick(&mut self) -> Result<(), TuiError> {
+        if let Some(ref job) = self.active_job {
+            match job.receiver.try_recv() {
+                Ok(BackgroundJobResult::Success(msg)) => {
+                    self.status_message = Some(format!("✓ {}", msg));
+                    self.active_job = None;
+                    let _ = self.refresh();
+                }
+                Ok(BackgroundJobResult::Error(err)) => {
+                    self.status_message = Some(format!("✗ {}", err));
+                    self.active_job = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Job running in background
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.status_message =
+                        Some("✗ Background job terminated unexpectedly".to_string());
+                    self.active_job = None;
+                }
             }
         }
         Ok(())

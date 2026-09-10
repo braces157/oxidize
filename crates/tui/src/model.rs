@@ -174,6 +174,8 @@ pub enum FileStatusKind {
     UnstagedDeleted,
     /// Untracked new file in working directory.
     Untracked,
+    /// Unmerged conflicted file with unresolved merge stages.
+    Conflicted,
 }
 
 impl FileStatusKind {
@@ -187,6 +189,7 @@ impl FileStatusKind {
             FileStatusKind::UnstagedModified => ("[M]", Color::Yellow),
             FileStatusKind::UnstagedDeleted => ("[D]", Color::LightRed),
             FileStatusKind::Untracked => ("[?]", Color::Magenta),
+            FileStatusKind::Conflicted => ("[U]", Color::Red),
         }
     }
 
@@ -200,6 +203,7 @@ impl FileStatusKind {
             FileStatusKind::UnstagedModified => "modified",
             FileStatusKind::UnstagedDeleted => "deleted",
             FileStatusKind::Untracked => "untracked",
+            FileStatusKind::Conflicted => "unmerged",
         }
     }
 

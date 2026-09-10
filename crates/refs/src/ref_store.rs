@@ -3,10 +3,11 @@
 use crate::signature::get_default_signature;
 use crate::RefError;
 use oxidize_core::id::ObjectId;
+use oxidize_core::lock::LockFile;
 use oxidize_core::object::{Object, Signature};
 use oxidize_core::store::ObjectReader;
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -154,6 +155,15 @@ impl RefStore {
         message: &str,
     ) -> Result<(), RefError> {
         let normalized = self.normalize_ref_name(ref_name);
+        oxidize_core::validate_ref_name(&normalized)
+            .map_err(|e| RefError::InvalidName(e.to_string()))?;
+
+        let ref_path = self.git_dir.join(&normalized);
+        let mut lock = oxidize_core::LockFile::acquire(&ref_path).map_err(|e| match e {
+            oxidize_core::CoreError::LockError(msg) => RefError::RevParseError(msg),
+            other => RefError::Core(other),
+        })?;
+
         let current_oid = self.read_ref(&normalized).ok();
 
         if let Some(expected) = old_oid {
@@ -165,20 +175,9 @@ impl RefStore {
             }
         }
 
-        let ref_path = self.git_dir.join(&normalized);
-        let lock_path = PathBuf::from(format!("{}.lock", ref_path.display()));
-
-        if let Some(parent) = ref_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        {
-            let mut file = File::create(&lock_path)?;
-            writeln!(file, "{}", new_oid)?;
-            file.flush()?;
-        }
-
-        fs::rename(lock_path, &ref_path)?;
+        use std::io::Write;
+        writeln!(lock, "{}", new_oid)?;
+        lock.commit()?;
 
         // Append reflog
         let from_oid = current_oid.unwrap_or(ObjectId::ZERO);
@@ -279,6 +278,60 @@ impl RefStore {
         }
 
         Ok(entries)
+    }
+
+    /// Returns the stash entries in Git stack order (index 0 is newest `stash@{0}`).
+    pub fn stash_list(&self) -> Result<Vec<ReflogEntry>, RefError> {
+        let mut entries = self.read_reflog("refs/stash")?;
+        entries.reverse();
+        Ok(entries)
+    }
+
+    /// Drops a stash entry by index (0 is newest `stash@{0}`).
+    /// Rewrites the reflog and updates `refs/stash` to maintain stack continuity,
+    /// or removes both if the last stash was dropped.
+    pub fn stash_drop(&self, index: usize) -> Result<ObjectId, RefError> {
+        let mut entries = self.read_reflog("refs/stash")?;
+        if entries.is_empty() || index >= entries.len() {
+            return Err(RefError::NotFound(format!("refs/stash@{{{}}}", index)));
+        }
+
+        let real_idx = entries.len() - 1 - index;
+        let removed = entries.remove(real_idx);
+
+        let stash_ref = self.git_dir.join("refs").join("stash");
+        let stash_log = self.git_dir.join("logs").join("refs").join("stash");
+
+        if entries.is_empty() {
+            let _ = fs::remove_file(&stash_ref);
+            let _ = fs::remove_file(&stash_log);
+        } else {
+            // Rewrite the reflog: line 0 has old_oid = 0, subsequent lines have old_oid = previous new_oid
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&stash_log)?;
+
+            let mut prev_oid = ObjectId::ZERO;
+            for entry in &entries {
+                writeln!(
+                    file,
+                    "{} {} {}\t{}",
+                    prev_oid, entry.new_oid, entry.signature, entry.message
+                )?;
+                prev_oid = entry.new_oid;
+            }
+            file.flush()?;
+
+            // Update refs/stash to the newest remaining entry
+            let newest = entries.last().unwrap();
+            let mut lock = LockFile::acquire(&stash_ref).map_err(RefError::Core)?;
+            lock.write_all(format!("{}\n", newest.new_oid).as_bytes())?;
+            lock.commit().map_err(RefError::Core)?;
+        }
+
+        Ok(removed.new_oid)
     }
 
     /// Resolves a revision specifier (`HEAD`, `HEAD~2`, branch name, short/full SHA) to an `ObjectId`.
@@ -395,7 +448,13 @@ impl RefStore {
 
     /// Creates a new branch reference pointing to `target_oid`.
     pub fn create_branch(&self, name: &str, target_oid: &ObjectId) -> Result<(), RefError> {
+        oxidize_core::validate_branch_name(name)?;
         let branch_path = self.git_dir.join("refs/heads").join(name);
+        let mut lock = oxidize_core::LockFile::acquire(&branch_path).map_err(|e| match e {
+            oxidize_core::CoreError::LockError(msg) => RefError::InvalidName(msg),
+            other => RefError::Core(other),
+        })?;
+
         if branch_path.exists() {
             return Err(RefError::InvalidName(format!(
                 "a branch named '{}' already exists",
@@ -403,16 +462,23 @@ impl RefStore {
             )));
         }
 
-        if let Some(parent) = branch_path.parent() {
-            fs::create_dir_all(parent)?;
+        let packed = self.read_packed_refs()?;
+        if packed.contains_key(&format!("refs/heads/{}", name)) {
+            return Err(RefError::InvalidName(format!(
+                "a branch named '{}' already exists",
+                name
+            )));
         }
 
-        fs::write(&branch_path, format!("{}\n", target_oid))?;
+        use std::io::Write;
+        writeln!(lock, "{}", target_oid)?;
+        lock.commit()?;
         Ok(())
     }
 
     /// Deletes a branch reference.
     pub fn delete_branch(&self, name: &str) -> Result<(), RefError> {
+        oxidize_core::validate_branch_name(name)?;
         let branch_path = self.git_dir.join("refs/heads").join(name);
         if !branch_path.exists() {
             return Err(RefError::NotFound(format!("branch '{}' not found", name)));
@@ -424,15 +490,22 @@ impl RefStore {
 
     /// Sets `HEAD` to point symbolically to a branch.
     pub fn set_head_symbolic(&self, branch_name: &str) -> Result<(), RefError> {
+        oxidize_core::validate_branch_name(branch_name)?;
         let head_path = self.git_dir.join("HEAD");
-        fs::write(head_path, format!("ref: refs/heads/{}\n", branch_name))?;
+        let mut lock = oxidize_core::LockFile::acquire(&head_path).map_err(RefError::Core)?;
+        use std::io::Write;
+        writeln!(lock, "ref: refs/heads/{}", branch_name)?;
+        lock.commit()?;
         Ok(())
     }
 
     /// Sets `HEAD` to a detached commit OID.
     pub fn set_head_detached(&self, commit_oid: &ObjectId) -> Result<(), RefError> {
         let head_path = self.git_dir.join("HEAD");
-        fs::write(head_path, format!("{}\n", commit_oid))?;
+        let mut lock = oxidize_core::LockFile::acquire(&head_path).map_err(RefError::Core)?;
+        use std::io::Write;
+        writeln!(lock, "{}", commit_oid)?;
+        lock.commit()?;
         Ok(())
     }
 

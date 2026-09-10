@@ -1,0 +1,34 @@
+
+name                 version rust_version
+----                 ------- ------------
+clap                 4.6.6   1.85
+clap_builder         4.6.6   1.85
+clap_complete        4.6.9   1.85
+clap_derive          4.6.4   1.85
+clap_lex             1.1.0   1.85
+darling              0.24.1  1.88.0
+darling_core         0.24.1  1.88.0
+darling_macro        0.24.1  1.88.0
+getrandom            0.4.3   1.85
+icu_collections      2.3.0   1.88
+icu_locale_core      2.3.0   1.88
+icu_normalizer       2.3.0   1.88
+icu_normalizer_data  2.3.0   1.88
+icu_properties       2.3.0   1.88
+icu_properties_data  2.3.0   1.88
+icu_provider         2.3.1   1.88
+idna_adapter         1.2.2   1.86
+instability          0.3.13  1.88
+litemap              0.8.3   1.82
+potential_utf        0.1.6   1.82
+tinystr              0.8.4   1.82
+unicode-segmentation 1.13.3  1.85.0
+windows-core         0.62.2  1.82
+windows-result       0.4.1   1.82
+windows-strings      0.5.1   1.82
+writeable            0.6.4   1.82
+yoke                 0.8.3   1.82
+zeroize              1.9.0   1.85
+zerotrie             0.2.5   1.82
+zerovec              0.11.8  1.83
+

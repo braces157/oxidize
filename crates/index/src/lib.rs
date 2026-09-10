@@ -21,6 +21,10 @@ pub enum IndexError {
     #[error("failed to parse index entry: {0}")]
     EntryParseError(String),
 
+    /// Unmerged entries in index prevent tree creation.
+    #[error("cannot write tree: index contains unmerged paths ({0})")]
+    UnmergedPaths(String),
+
     /// Standard I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

@@ -916,6 +916,7 @@ dependencies = [
  "oxidize-index",
  "oxidize-pack",
  "oxidize-refs",
+ "oxidize-transport",
  "ratatui",
  "tempfile",
  "thiserror",

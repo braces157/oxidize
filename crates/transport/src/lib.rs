@@ -41,12 +41,20 @@ pub mod protocol;
 pub mod ssh;
 
 pub use client::SmartHttpClient;
-pub use local::{discover_local_refs, fetch_local_pack, resolve_local_path};
+pub use local::{
+    discover_local_refs, fetch_local_pack, fetch_local_pack_negotiated, resolve_local_path,
+};
 pub use pkt_line::{
-    encode_flush, encode_pkt_line, encode_pkt_line_str, parse_pkt_line, read_pkt_lines,
-    read_single_pkt_line, PktLine, SidebandDemuxer,
+    encode_flush, encode_pkt_line, encode_pkt_line_str, parse_pkt_line, read_next_pkt_line,
+    read_pkt_lines, read_pkt_lines_until_flush, read_single_pkt_line, PktLine, SidebandDemuxer,
 };
 pub use protocol::{
-    build_receive_pack_request, build_upload_pack_request, parse_ref_advertisement, RemoteRef,
+    build_receive_pack_request, build_receive_pack_request_with_caps, build_upload_pack_request,
+    build_upload_pack_request_with_caps, negotiate_receive_pack_capabilities,
+    negotiate_upload_pack_capabilities, parse_push_report, parse_ref_advertisement, PushRefStatus,
+    PushReport, RemoteRef,
 };
-pub use ssh::{find_ssh_binary, is_ssh_url, parse_ssh_url, SshClient, SshEndpoint};
+pub use ssh::{
+    find_ssh_binary, is_ssh_url, parse_command_tokens, parse_ssh_url, sq_quote,
+    validate_ssh_endpoint, SshClient, SshEndpoint, SshInvocation,
+};

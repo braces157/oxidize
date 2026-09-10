@@ -12,6 +12,13 @@ use ratatui::Frame;
 pub fn render(frame: &mut Frame, app: &App) {
     let size = frame.area();
 
+    if size.width < 20 || size.height < 6 {
+        let msg =
+            Paragraph::new("Terminal window too small").style(Style::default().fg(Color::Yellow));
+        frame.render_widget(msg, size);
+        return;
+    }
+
     // Vertical layout: Main Workspace (Min 0), Bottom Status/Feedback Bar (1)
     let chunks = Layout::default()
         .direction(Direction::Vertical)

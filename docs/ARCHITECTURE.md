@@ -1,6 +1,6 @@
 # Oxidize Architecture Guide
 
-Oxidize is an engineered, byte-compatible, multi-threaded reimplementation of Git written in 100% safe, idiomatic Rust. It is organized as a modular workspace consisting of 9 specialized crates.
+Oxidize is an engineered, byte-compatible, multi-threaded reimplementation of Git written in memory-safe, idiomatic Rust. It is organized as a modular workspace consisting of 9 specialized crates.
 
 ```
 ┌──────────────────────────────────────────────────────────┐

@@ -94,6 +94,13 @@ pub fn parse_pkt_line(input: &[u8]) -> Result<Option<(PktLine, usize)>, Transpor
         )));
     }
 
+    if len > 65524 {
+        return Err(TransportError::PktLineError(format!(
+            "packet length {} exceeds maximum allowed 65524",
+            len
+        )));
+    }
+
     if input.len() < len {
         return Ok(None);
     }
@@ -102,21 +109,42 @@ pub fn parse_pkt_line(input: &[u8]) -> Result<Option<(PktLine, usize)>, Transpor
     Ok(Some((PktLine::Data(payload), len)))
 }
 
-/// Reads a single packet line directly from a reader.
-pub fn read_single_pkt_line<R: Read>(reader: &mut R) -> Result<PktLine, TransportError> {
+/// Reads the next packet line incrementally from a reader.
+/// Returns `Ok(Some(PktLine))` on success, `Ok(None)` on clean EOF at packet boundary,
+/// or `Err(TransportError)` on truncated prefix, oversized packet, or I/O failure.
+pub fn read_next_pkt_line<R: Read>(reader: &mut R) -> Result<Option<PktLine>, TransportError> {
     let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf)?;
+    let mut bytes_read = 0;
+    while bytes_read < 1 {
+        let n = reader.read(&mut len_buf[bytes_read..1])?;
+        if n == 0 {
+            return Ok(None); // Clean EOF at packet boundary
+        }
+        bytes_read += n;
+    }
+
+    // Now we have the first byte; we must read the remaining 3 prefix bytes or fail with truncated prefix
+    while bytes_read < 4 {
+        let n = reader.read(&mut len_buf[bytes_read..4])?;
+        if n == 0 {
+            return Err(TransportError::PktLineError(
+                "truncated pkt-line length prefix".to_string(),
+            ));
+        }
+        bytes_read += n;
+    }
+
     let hex_str = std::str::from_utf8(&len_buf)
         .map_err(|e| TransportError::PktLineError(format!("invalid hex length utf8: {}", e)))?;
 
     if hex_str == "0000" {
-        return Ok(PktLine::Flush);
+        return Ok(Some(PktLine::Flush));
     }
     if hex_str == "0001" {
-        return Ok(PktLine::Delim);
+        return Ok(Some(PktLine::Delim));
     }
     if hex_str == "0002" {
-        return Ok(PktLine::ResponseEnd);
+        return Ok(Some(PktLine::ResponseEnd));
     }
 
     let len = usize::from_str_radix(hex_str, 16).map_err(|e| {
@@ -130,9 +158,33 @@ pub fn read_single_pkt_line<R: Read>(reader: &mut R) -> Result<PktLine, Transpor
         )));
     }
 
+    if len > 65524 {
+        return Err(TransportError::PktLineError(format!(
+            "packet length {} exceeds maximum allowed 65524",
+            len
+        )));
+    }
+
     let mut payload = vec![0u8; len - 4];
-    reader.read_exact(&mut payload)?;
-    Ok(PktLine::Data(payload))
+    reader.read_exact(&mut payload).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            TransportError::PktLineError("truncated pkt-line payload".to_string())
+        } else {
+            TransportError::Io(e)
+        }
+    })?;
+    Ok(Some(PktLine::Data(payload)))
+}
+
+/// Reads a single packet line directly from a reader.
+pub fn read_single_pkt_line<R: Read>(reader: &mut R) -> Result<PktLine, TransportError> {
+    match read_next_pkt_line(reader)? {
+        Some(line) => Ok(line),
+        None => Err(TransportError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "unexpected EOF while reading pkt-line",
+        ))),
+    }
 }
 
 /// Reads all packet lines until EOF from a reader.
@@ -150,9 +202,6 @@ pub fn read_pkt_lines(mut reader: impl Read) -> Result<Vec<PktLine>, TransportEr
                 slice = &slice[consumed..];
             }
             None => {
-                if slice.len() < 4 {
-                    break;
-                }
                 return Err(TransportError::PktLineError(
                     "truncated pkt-line".to_string(),
                 ));
@@ -160,6 +209,24 @@ pub fn read_pkt_lines(mut reader: impl Read) -> Result<Vec<PktLine>, TransportEr
         }
     }
 
+    Ok(lines)
+}
+
+/// Reads packet lines sequentially from a reader until a Flush packet (`0000`) is encountered.
+pub fn read_pkt_lines_until_flush<R: Read>(mut reader: R) -> Result<Vec<PktLine>, TransportError> {
+    let mut lines = Vec::new();
+    while let Some(line) = read_next_pkt_line(&mut reader)? {
+        let is_flush = line.is_flush();
+        lines.push(line);
+        if is_flush {
+            break;
+        }
+        if lines.len() > 100_000 {
+            return Err(TransportError::Protocol(
+                "ref advertisement exceeded maximum allowed pkt-line count".to_string(),
+            ));
+        }
+    }
     Ok(lines)
 }
 
@@ -175,15 +242,28 @@ pub struct SidebandDemuxer {
 }
 
 impl SidebandDemuxer {
-    /// Demultiplexes a list of pkt-lines according to side-band-64k rules.
-    pub fn from_lines(lines: &[PktLine]) -> Result<Self, TransportError> {
+    /// Incremental streaming reader that demultiplexes side-band chunks directly from a reader
+    /// until a Flush packet (`0000`) or EOF is encountered.
+    pub fn read_stream<R: Read>(mut reader: R) -> Result<Self, TransportError> {
         let mut demux = Self::default();
 
-        for line in lines {
+        while let Some(line) = read_next_pkt_line(&mut reader)? {
+            if line.is_flush() {
+                break;
+            }
             if let PktLine::Data(ref bytes) = line {
                 if bytes.is_empty() {
                     continue;
                 }
+                // Skip protocol negotiation lines (e.g. NAK, ACK <oid>, shallow <oid>, unshallow <oid>)
+                if bytes.starts_with(b"NAK")
+                    || bytes.starts_with(b"ACK ")
+                    || bytes.starts_with(b"shallow ")
+                    || bytes.starts_with(b"unshallow ")
+                {
+                    continue;
+                }
+
                 let band = bytes[0];
                 let payload = &bytes[1..];
                 match band {
@@ -199,8 +279,77 @@ impl SidebandDemuxer {
                         demux.errors.push(err);
                     }
                     _ => {
-                        // Fallback for non-sideband data: treat entire payload as pack data
-                        demux.pack_data.extend_from_slice(bytes);
+                        if bytes.starts_with(b"ERR ") {
+                            demux
+                                .errors
+                                .push(String::from_utf8_lossy(&bytes[4..]).to_string());
+                        } else if bytes.starts_with(b"PACK") {
+                            // Raw pack stream chunk without sideband framing
+                            demux.pack_data.extend_from_slice(bytes);
+                        } else {
+                            return Err(TransportError::Protocol(format!(
+                                "invalid sideband band number: {}",
+                                band
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        if !demux.errors.is_empty() {
+            return Err(TransportError::Protocol(demux.errors.join("; ")));
+        }
+
+        Ok(demux)
+    }
+
+    /// Demultiplexes a list of pkt-lines according to side-band-64k rules.
+    pub fn from_lines(lines: &[PktLine]) -> Result<Self, TransportError> {
+        let mut demux = Self::default();
+
+        for line in lines {
+            if let PktLine::Data(ref bytes) = line {
+                if bytes.is_empty() {
+                    continue;
+                }
+                // Skip protocol negotiation lines (e.g. NAK, ACK <oid>, shallow <oid>, unshallow <oid>)
+                if bytes.starts_with(b"NAK")
+                    || bytes.starts_with(b"ACK ")
+                    || bytes.starts_with(b"shallow ")
+                    || bytes.starts_with(b"unshallow ")
+                {
+                    continue;
+                }
+
+                let band = bytes[0];
+                let payload = &bytes[1..];
+                match band {
+                    1 => {
+                        demux.pack_data.extend_from_slice(payload);
+                    }
+                    2 => {
+                        let msg = String::from_utf8_lossy(payload).to_string();
+                        demux.progress.push(msg);
+                    }
+                    3 => {
+                        let err = String::from_utf8_lossy(payload).to_string();
+                        demux.errors.push(err);
+                    }
+                    _ => {
+                        if bytes.starts_with(b"ERR ") {
+                            demux
+                                .errors
+                                .push(String::from_utf8_lossy(&bytes[4..]).to_string());
+                        } else if bytes.starts_with(b"PACK") {
+                            // Raw pack stream chunk without sideband framing
+                            demux.pack_data.extend_from_slice(bytes);
+                        } else {
+                            return Err(TransportError::Protocol(format!(
+                                "invalid sideband band number: {}",
+                                band
+                            )));
+                        }
                     }
                 }
             }

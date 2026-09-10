@@ -2,6 +2,7 @@
 name = "oxidize-tui"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 
@@ -11,6 +12,7 @@ oxidize-index.workspace = true
 oxidize-refs.workspace = true
 oxidize-diff.workspace = true
 oxidize-pack.workspace = true
+oxidize-transport.workspace = true
 oxidize-config.workspace = true
 chrono.workspace = true
 thiserror.workspace = true

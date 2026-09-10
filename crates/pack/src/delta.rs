@@ -2,6 +2,9 @@
 
 use crate::PackError;
 
+/// Maximum allowed delta target object size (512 MiB).
+pub const MAX_DELTA_TARGET_SIZE: usize = 512 * 1024 * 1024;
+
 /// Applies a Git packfile delta stream to a base object slice.
 pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
     let mut cursor = 0;
@@ -20,8 +23,15 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
     // 2. Read target object size (variable length integer)
     let (target_size, bytes_read) = read_varint(delta, cursor)?;
     cursor += bytes_read;
+    if target_size > MAX_DELTA_TARGET_SIZE {
+        return Err(PackError::DeltaError(format!(
+            "target size {} exceeds maximum allowed limit {}",
+            target_size, MAX_DELTA_TARGET_SIZE
+        )));
+    }
 
-    let mut out = Vec::with_capacity(target_size);
+    // Bounded initial capacity allocation to prevent OOM on malicious target_size
+    let mut out = Vec::with_capacity(target_size.min(1024 * 1024));
 
     // 3. Process delta instruction opcodes
     while cursor < delta.len() {
@@ -34,31 +44,66 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
             let mut size = 0usize;
 
             if (opcode & 0x01) != 0 {
+                if cursor >= delta.len() {
+                    return Err(PackError::DeltaError(
+                        "truncated copy instruction in delta".to_string(),
+                    ));
+                }
                 offset |= delta[cursor] as usize;
                 cursor += 1;
             }
             if (opcode & 0x02) != 0 {
+                if cursor >= delta.len() {
+                    return Err(PackError::DeltaError(
+                        "truncated copy instruction in delta".to_string(),
+                    ));
+                }
                 offset |= (delta[cursor] as usize) << 8;
                 cursor += 1;
             }
             if (opcode & 0x04) != 0 {
+                if cursor >= delta.len() {
+                    return Err(PackError::DeltaError(
+                        "truncated copy instruction in delta".to_string(),
+                    ));
+                }
                 offset |= (delta[cursor] as usize) << 16;
                 cursor += 1;
             }
             if (opcode & 0x08) != 0 {
+                if cursor >= delta.len() {
+                    return Err(PackError::DeltaError(
+                        "truncated copy instruction in delta".to_string(),
+                    ));
+                }
                 offset |= (delta[cursor] as usize) << 24;
                 cursor += 1;
             }
 
             if (opcode & 0x10) != 0 {
+                if cursor >= delta.len() {
+                    return Err(PackError::DeltaError(
+                        "truncated copy instruction in delta".to_string(),
+                    ));
+                }
                 size |= delta[cursor] as usize;
                 cursor += 1;
             }
             if (opcode & 0x20) != 0 {
+                if cursor >= delta.len() {
+                    return Err(PackError::DeltaError(
+                        "truncated copy instruction in delta".to_string(),
+                    ));
+                }
                 size |= (delta[cursor] as usize) << 8;
                 cursor += 1;
             }
             if (opcode & 0x40) != 0 {
+                if cursor >= delta.len() {
+                    return Err(PackError::DeltaError(
+                        "truncated copy instruction in delta".to_string(),
+                    ));
+                }
                 size |= (delta[cursor] as usize) << 16;
                 cursor += 1;
             }
@@ -67,7 +112,11 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
                 size = 0x10000; // 64 KiB
             }
 
-            if offset + size > base.len() {
+            let end_offset = offset.checked_add(size).ok_or_else(|| {
+                PackError::DeltaError("copy offset arithmetic overflow".to_string())
+            })?;
+
+            if end_offset > base.len() {
                 return Err(PackError::DeltaError(format!(
                     "copy out of bounds: offset {} + size {} > base len {}",
                     offset,
@@ -76,17 +125,35 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
                 )));
             }
 
-            out.extend_from_slice(&base[offset..offset + size]);
+            if out.len().checked_add(size).is_none_or(|l| l > target_size) {
+                return Err(PackError::DeltaError(format!(
+                    "delta output exceeds declared target size {}",
+                    target_size
+                )));
+            }
+
+            out.extend_from_slice(&base[offset..end_offset]);
         } else if opcode != 0 {
             // Insert instruction
             let size = opcode as usize;
-            if cursor + size > delta.len() {
+            let end = cursor
+                .checked_add(size)
+                .ok_or_else(|| PackError::DeltaError("insert size overflow".to_string()))?;
+            if end > delta.len() {
                 return Err(PackError::DeltaError(
                     "insert instruction exceeds delta slice".to_string(),
                 ));
             }
-            out.extend_from_slice(&delta[cursor..cursor + size]);
-            cursor += size;
+
+            if out.len().checked_add(size).is_none_or(|l| l > target_size) {
+                return Err(PackError::DeltaError(format!(
+                    "delta output exceeds declared target size {}",
+                    target_size
+                )));
+            }
+
+            out.extend_from_slice(&delta[cursor..end]);
+            cursor = end;
         } else {
             return Err(PackError::DeltaError("invalid delta opcode 0".to_string()));
         }
@@ -216,14 +283,21 @@ fn read_varint(data: &[u8], mut cursor: usize) -> Result<(usize, usize), PackErr
     while cursor < data.len() {
         let byte = data[cursor];
         cursor += 1;
-        result |= ((byte & 0x7F) as usize) << shift;
+        let val = (byte & 0x7F) as usize;
+        if shift >= usize::BITS as usize {
+            return Err(PackError::DeltaError("varint overflow".to_string()));
+        }
+        if val != 0
+            && shift + 7 > usize::BITS as usize
+            && (val >> (usize::BITS as usize - shift)) != 0
+        {
+            return Err(PackError::DeltaError("varint overflow".to_string()));
+        }
+        result |= val << shift;
         if (byte & 0x80) == 0 {
             return Ok((result, cursor - start));
         }
         shift += 7;
-        if shift > 64 {
-            return Err(PackError::DeltaError("varint overflow".to_string()));
-        }
     }
 
     Err(PackError::DeltaError("truncated varint".to_string()))

@@ -6,13 +6,13 @@ use clap_complete::{generate, Shell};
 use oxidize_config::{GitConfig, GitIgnore};
 use oxidize_core::store::parse_object_from_content;
 use oxidize_core::{
-    find_git_dir, Blob, Commit, FileMode, LooseObjectStore, Object, ObjectId, ObjectType,
-    Signature, Tag as CoreTag, Tree, TreeEntry,
+    find_git_dir, strip_verbatim_prefix, Blob, Commit, FileMode, LooseObjectStore, Object,
+    ObjectId, ObjectReader, ObjectType, RepoContext, Signature, Tag as CoreTag, Tree, TreeEntry,
 };
 use oxidize_diff::{format_unified_diff, three_way_merge};
 use oxidize_index::{
-    compute_status, compute_status_with_ignore, flatten_tree, write_tree, Index, IndexEntry,
-    StagedChange, UnstagedChange,
+    compute_status_with_ignore, flatten_tree, write_tree, Index, IndexEntry, StagedChange,
+    UnstagedChange,
 };
 use oxidize_pack::{
     index_packfile, read_pack_object_at, unpack_packfile, write_pack, PackIndex, RawPackObject,
@@ -24,6 +24,7 @@ use oxidize_transport::{
     SshClient,
 };
 use sha1::{Digest, Sha1};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -84,7 +85,16 @@ enum Commands {
         #[arg(long)]
         add: bool,
 
+        /// Set the execute permissions on the updated files (+x or -x)
+        #[arg(long)]
+        chmod: Option<String>,
+
+        /// Set the version of the index file
+        #[arg(long)]
+        index_version: Option<u32>,
+
         /// Files to act on
+        #[arg(default_value = "")]
         files: Vec<String>,
     },
 
@@ -338,8 +348,12 @@ enum Commands {
 
     /// Join two or more development histories together
     Merge {
+        /// Abort the current in-progress merge
+        #[arg(long)]
+        abort: bool,
+
         /// Commit or branch to merge into HEAD
-        commit: String,
+        commit: Option<String>,
     },
 
     /// Reapply commits on top of another base tip
@@ -426,6 +440,10 @@ enum Commands {
 
         /// Refspec or branch to push
         branch: Option<String>,
+
+        /// Force update of remote refs
+        #[arg(short, long)]
+        force: bool,
     },
 
     /// Fetch from and integrate with another repository or a local branch
@@ -560,19 +578,29 @@ enum RemoteCommand {
 }
 
 fn main() -> Result<()> {
-    let raw_args: Vec<String> = std::env::args().collect();
-    let expanded_args = expand_aliases(raw_args);
-    let cli = Cli::parse_from(expanded_args);
+    // Windows default main thread stack is 1MB, which can overflow during Clap AST traversal
+    // with 40+ subcommands. Spawn with an 8MB stack like cargo/rustc.
+    let builder = std::thread::Builder::new().stack_size(8 * 1024 * 1024);
+    let handler = builder.spawn(|| -> Result<()> {
+        let raw_args: Vec<String> = std::env::args().collect();
+        let expanded_args = expand_aliases(raw_args);
+        let cli = Cli::parse_from(expanded_args);
 
-    match cli.command {
-        Some(cmd) => dispatch_command(cmd)?,
-        None => {
-            // If no subcommand given, print short help
-            println!("ox: A complete Git implementation in Rust. Run `ox --help` for usage.");
+        match cli.command {
+            Some(cmd) => dispatch_command(cmd)?,
+            None => {
+                // If no subcommand given, print short help
+                println!("ox: A complete Git implementation in Rust. Run `ox --help` for usage.");
+            }
         }
-    }
 
-    Ok(())
+        Ok(())
+    })?;
+
+    match handler.join() {
+        Ok(res) => res,
+        Err(e) => std::panic::resume_unwind(e),
+    }
 }
 
 fn expand_aliases(raw_args: Vec<String>) -> Vec<String> {
@@ -695,7 +723,12 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
         Commands::Add { files } => cmd_add(files)?,
         Commands::Status => cmd_status()?,
         Commands::LsFiles { stage } => cmd_ls_files(stage)?,
-        Commands::UpdateIndex { add, files } => cmd_update_index(add, files)?,
+        Commands::UpdateIndex {
+            add,
+            chmod,
+            index_version,
+            files,
+        } => cmd_update_index(add, chmod, index_version, files)?,
         Commands::WriteTree => cmd_write_tree()?,
         Commands::Commit { message } => cmd_commit(message)?,
         Commands::Log {
@@ -722,7 +755,7 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
             target,
         } => cmd_checkout(create_branch, target)?,
         Commands::Switch { create, branch } => cmd_switch(create, branch)?,
-        Commands::Merge { commit } => cmd_merge(commit)?,
+        Commands::Merge { abort, commit } => cmd_merge(abort, commit)?,
         Commands::Reset {
             hard,
             soft,
@@ -741,7 +774,11 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
         } => cmd_clone(repository, directory)?,
         Commands::Fetch { remote } => cmd_fetch(remote)?,
         Commands::Pull { remote, branch } => cmd_pull(remote, branch)?,
-        Commands::Push { remote, branch } => cmd_push(remote, branch)?,
+        Commands::Push {
+            remote,
+            branch,
+            force,
+        } => cmd_push(remote, branch, force)?,
         Commands::Remote { subcommand } => cmd_remote(subcommand)?,
         Commands::Rm {
             cached,
@@ -1070,37 +1107,112 @@ fn get_head_info(
 }
 
 fn cmd_add(files: Vec<String>) -> Result<()> {
-    let git_dir = find_git_dir(Path::new("."))?;
-    let repo_root = git_dir.parent().context("git_dir has no parent")?;
+    let ctx = RepoContext::discover(Path::new("."))?;
+    let repo_root = ctx
+        .worktree
+        .as_deref()
+        .context("cannot add in bare repository")?;
+    let git_dir = &ctx.git_dir;
     let store = LooseObjectStore::new(git_dir.join("objects"));
     let index_path = git_dir.join("index");
     let mut index = Index::load_from(&index_path)?;
     let gitignore = GitIgnore::load_from_dir(repo_root).unwrap_or_default();
 
-    use rayon::prelude::*;
+    if files.is_empty() {
+        eprintln!("Nothing specified, nothing added.\nMaybe you wanted to say 'ox add .'?");
+        return Ok(());
+    }
 
-    let mut all_files = Vec::new();
-    for file_arg in files {
+    let cur_dir = std::env::current_dir()?;
+    let cur_dir = strip_verbatim_prefix(&cur_dir);
+
+    // Track existing index paths for fast lookup
+    let tracked_index_paths: BTreeSet<String> =
+        index.entries().iter().map(|e| e.path.clone()).collect();
+    let mut files_to_stage: Vec<PathBuf> = Vec::new();
+    let mut deletions_to_stage: BTreeSet<String> = BTreeSet::new();
+
+    for file_arg in &files {
         let is_dot = file_arg == ".";
         let target_path = if is_dot {
-            repo_root.to_path_buf()
+            cur_dir.clone()
         } else {
-            let p = Path::new(&file_arg);
+            let p = Path::new(file_arg);
             if p.is_relative() {
-                std::env::current_dir()?.join(p)
+                cur_dir.join(p)
             } else {
                 p.to_path_buf()
             }
         };
 
-        collect_files_to_add(repo_root, &target_path, &gitignore, is_dot, &mut all_files)?;
+        // Determine path relative to repo_root
+        let rel_target = match target_path.strip_prefix(repo_root) {
+            Ok(p) => p,
+            Err(_) => bail!(
+                "path '{}' is outside repository root",
+                target_path.display()
+            ),
+        };
+        let rel_target_str = rel_target.to_string_lossy().replace('\\', "/");
+        let rel_target_str = rel_target_str.trim_matches('/').to_string();
+
+        let is_all = is_dot && rel_target_str.is_empty();
+        let target_dir_prefix = if rel_target_str.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", rel_target_str)
+        };
+
+        // Check for tracked files matching this target that were deleted from working tree
+        for path in &tracked_index_paths {
+            let matches = is_all
+                || path == &rel_target_str
+                || (!target_dir_prefix.is_empty() && path.starts_with(&target_dir_prefix));
+
+            if matches {
+                let full = repo_root.join(path);
+                if !full.exists() {
+                    deletions_to_stage.insert(path.clone());
+                }
+            }
+        }
+
+        if target_path.is_dir() {
+            collect_files_to_add(
+                repo_root,
+                &target_path,
+                &gitignore,
+                &tracked_index_paths,
+                &mut files_to_stage,
+            )?;
+        } else if target_path.is_file() {
+            files_to_stage.push(target_path);
+        } else if !deletions_to_stage.iter().any(|d| {
+            d == &rel_target_str
+                || (!target_dir_prefix.is_empty() && d.starts_with(&target_dir_prefix))
+        }) {
+            bail!("pathspec '{}' did not match any files", file_arg);
+        }
     }
 
-    all_files.sort();
-    all_files.dedup();
+    // Apply staged deletions
+    for del_path in &deletions_to_stage {
+        index.remove_entry(del_path);
+    }
+
+    files_to_stage.sort();
+    files_to_stage.dedup();
+
+    // Map existing modes so we preserve permissions (such as 100755) when updating on Windows
+    let existing_modes: std::collections::HashMap<String, u32> = index
+        .entries()
+        .iter()
+        .map(|e| (e.path.clone(), e.mode))
+        .collect();
 
     // Parallelize reading, hashing, and writing loose objects across threads with Rayon
-    let entries: Vec<Result<IndexEntry>> = all_files
+    use rayon::prelude::*;
+    let entries: Vec<Result<IndexEntry>> = files_to_stage
         .par_iter()
         .map(|target| {
             let rel_path = target
@@ -1114,14 +1226,23 @@ fn cmd_add(files: Vec<String>) -> Result<()> {
             let oid = store.write_object(&blob)?;
 
             let meta = std::fs::metadata(target)?;
-            Ok(IndexEntry::from_fs_metadata(rel_path, oid, &meta, 0))
+            let mut entry = IndexEntry::from_fs_metadata(rel_path.clone(), oid, &meta, 0);
+            #[cfg(not(unix))]
+            if let Some(&old_mode) = existing_modes.get(&rel_path) {
+                if old_mode == 0o100755 {
+                    entry.mode = 0o100755;
+                }
+            }
+            Ok(entry)
         })
         .collect();
 
+    let mut new_entries = Vec::with_capacity(entries.len());
     for entry_res in entries {
         let entry = entry_res?;
-        index.add_entry(entry);
+        new_entries.push(entry);
     }
+    index.add_entries(new_entries);
 
     index.write_to(&index_path)?;
     Ok(())
@@ -1131,7 +1252,7 @@ fn collect_files_to_add(
     repo_root: &Path,
     target: &Path,
     gitignore: &GitIgnore,
-    recursing_all: bool,
+    tracked_paths: &BTreeSet<String>,
     out: &mut Vec<PathBuf>,
 ) -> Result<()> {
     if target.is_dir() {
@@ -1145,36 +1266,43 @@ fn collect_files_to_add(
             }
             if let Ok(rel) = path.strip_prefix(repo_root) {
                 let rel_str = rel.to_string_lossy().replace('\\', "/");
-                if gitignore.is_ignored(&rel_str, path.is_dir()) {
+                let is_dir = path.is_dir();
+                let is_tracked = tracked_paths.contains(&rel_str);
+
+                if is_dir {
+                    let dir_prefix = format!("{}/", rel_str);
+                    let has_tracked = tracked_paths
+                        .range(dir_prefix.clone()..)
+                        .next()
+                        .is_some_and(|p| p.starts_with(&dir_prefix));
+                    if gitignore.is_ignored(&rel_str, true) && !has_tracked {
+                        continue;
+                    }
+                } else if !is_tracked && gitignore.is_ignored(&rel_str, false) {
                     continue;
                 }
             }
-            collect_files_to_add(repo_root, &path, gitignore, recursing_all, out)?;
+            collect_files_to_add(repo_root, &path, gitignore, tracked_paths, out)?;
         }
     } else if target.is_file() {
-        let rel_path = target
-            .strip_prefix(repo_root)
-            .with_context(|| format!("path '{}' is outside repository root", target.display()))?
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        if recursing_all && gitignore.is_ignored(&rel_path, false) {
-            return Ok(());
-        }
         out.push(target.to_path_buf());
     }
     Ok(())
 }
 
 fn cmd_status() -> Result<()> {
-    let git_dir = find_git_dir(Path::new("."))?;
-    let repo_root = git_dir.parent().context("git_dir has no parent")?;
-    let store = RepoObjectStore::open(&git_dir)?;
+    let ctx = RepoContext::discover(Path::new("."))?;
+    let repo_root = ctx
+        .worktree
+        .as_deref()
+        .context("cannot check status in bare repository")?;
+    let git_dir = &ctx.git_dir;
+    let store = RepoObjectStore::open(git_dir)?;
     let index_path = git_dir.join("index");
     let index = Index::load_from(&index_path)?;
     let gitignore = GitIgnore::load_from_dir(repo_root).unwrap_or_default();
 
-    let (branch_name, head_commit, head_tree) = get_head_info(&git_dir, &store)?;
+    let (branch_name, head_commit, head_tree) = get_head_info(git_dir, &store)?;
     let status = compute_status_with_ignore(
         repo_root,
         &index,
@@ -1190,6 +1318,16 @@ fn cmd_status() -> Result<()> {
     }
 
     let mut clean = true;
+
+    if !status.unmerged.is_empty() {
+        clean = false;
+        println!("Unmerged paths:");
+        println!("  (use \"ox add <file>...\" to mark resolution)");
+        for path in &status.unmerged {
+            println!("\tboth modified:   {}", path);
+        }
+        println!();
+    }
 
     if !status.staged.is_empty() {
         clean = false;
@@ -1265,35 +1403,73 @@ fn cmd_write_tree() -> Result<()> {
     Ok(())
 }
 
-fn cmd_update_index(add: bool, files: Vec<String>) -> Result<()> {
-    let git_dir = find_git_dir(Path::new("."))?;
-    let repo_root = git_dir.parent().context("git_dir has no parent")?;
+fn cmd_update_index(
+    add: bool,
+    chmod: Option<String>,
+    index_version: Option<u32>,
+    files: Vec<String>,
+) -> Result<()> {
+    let ctx = RepoContext::discover(Path::new("."))?;
+    let repo_root = ctx
+        .worktree
+        .as_deref()
+        .context("cannot update index in bare repository")?;
+    let git_dir = &ctx.git_dir;
     let store = LooseObjectStore::new(git_dir.join("objects"));
     let index_path = git_dir.join("index");
     let mut index = Index::load_from(&index_path)?;
 
+    if let Some(ver) = index_version {
+        if ver != 2 && ver != 3 && ver != 4 {
+            bail!("unsupported index version {}", ver);
+        }
+        index.version = ver;
+    }
+
+    let cur_dir = std::env::current_dir()?;
+    let cur_dir = strip_verbatim_prefix(&cur_dir);
+
     for file_str in files {
+        if file_str.is_empty() {
+            continue;
+        }
         let p = Path::new(&file_str);
         let abs = if p.is_relative() {
-            std::env::current_dir()?.join(p)
+            cur_dir.join(p)
         } else {
             p.to_path_buf()
         };
 
-        if abs.exists() {
-            let rel = abs
-                .strip_prefix(repo_root)
-                .with_context(|| format!("path '{}' is outside repository root", abs.display()))?
-                .to_string_lossy()
-                .replace('\\', "/");
+        let rel = match abs.strip_prefix(repo_root) {
+            Ok(p) => p.to_string_lossy().replace('\\', "/"),
+            Err(_) => bail!("path '{}' is outside repository root", abs.display()),
+        };
 
+        if let Some(ref ch) = chmod {
+            if let Some(entry) = index.entries.iter_mut().find(|e| e.path == rel) {
+                if ch == "+x" {
+                    entry.mode = 0o100755;
+                } else if ch == "-x" {
+                    entry.mode = 0o100644;
+                }
+            }
+        }
+
+        if abs.exists() {
             let data = std::fs::read(&abs)?;
             let blob = Object::Blob(Blob::new(data));
             let oid = store.write_object(&blob)?;
             let meta = std::fs::metadata(&abs)?;
-            let entry = IndexEntry::from_fs_metadata(rel, oid, &meta, 0);
+            let mut entry = IndexEntry::from_fs_metadata(rel.clone(), oid, &meta, 0);
+            if let Some(ref ch) = chmod {
+                if ch == "+x" {
+                    entry.mode = 0o100755;
+                } else if ch == "-x" {
+                    entry.mode = 0o100644;
+                }
+            }
             index.add_entry(entry);
-        } else if !add {
+        } else if !add && chmod.is_none() {
             bail!("cannot find file {}", file_str);
         }
     }
@@ -1309,34 +1485,76 @@ fn cmd_commit(message: Option<String>) -> Result<()> {
     let index_path = git_dir.join("index");
     let index = Index::load_from(&index_path)?;
 
-    if index.entries().is_empty() {
-        bail!("nothing to commit (create/copy files and use \"ox add\" to track)");
+    // 1. Reject unmerged paths
+    let mut unmerged = Vec::new();
+    for entry in index.entries() {
+        if entry.stage != 0 {
+            unmerged.push(entry.path.clone());
+        }
+    }
+    if !unmerged.is_empty() {
+        unmerged.sort();
+        unmerged.dedup();
+        bail!(
+            "cannot commit: you have unmerged files ({})",
+            unmerged.join(", ")
+        );
     }
 
+    // 2. Build tree from index
     let tree_oid = write_tree(&index, &store)?;
     let (branch_name, head_commit_oid) = ref_store.resolve_head()?;
 
+    // 3. Check for MERGE_HEAD
+    let merge_head_file = git_dir.join("MERGE_HEAD");
+    let merge_head_oid = if merge_head_file.exists() {
+        let content = std::fs::read_to_string(&merge_head_file)?;
+        let hex = content.trim();
+        if hex.is_empty() {
+            None
+        } else {
+            Some(hex.parse::<ObjectId>().context("invalid MERGE_HEAD OID")?)
+        }
+    } else {
+        None
+    };
+
+    // 4. Check if working tree / index is clean relative to HEAD
     if let Some(ref head_oid) = head_commit_oid {
         if let Ok(Object::Commit(head_commit)) = store.read_object(head_oid) {
-            if head_commit.tree == tree_oid {
+            if head_commit.tree == tree_oid && merge_head_oid.is_none() {
                 println!("On branch {}", branch_name);
                 println!("nothing to commit, working tree clean");
                 return Ok(());
             }
         }
+    } else if index.entries().is_empty() {
+        bail!("nothing to commit (create/copy files and use \"ox add\" to track)");
     }
 
-    let msg_str = message.unwrap_or_else(|| "unspecified commit message".to_string());
+    // 5. Determine commit message
+    let msg_str = if let Some(m) = message {
+        m
+    } else if let Ok(merge_msg) = std::fs::read_to_string(git_dir.join("MERGE_MSG")) {
+        merge_msg
+    } else {
+        bail!("Aborting commit due to empty commit message.");
+    };
+
     if msg_str.trim().is_empty() {
         bail!("Aborting commit due to empty commit message.");
     }
 
     let sig = get_default_signature(Some(&git_dir));
-    let parents = if let Some(p) = head_commit_oid {
-        vec![p]
-    } else {
-        Vec::new()
-    };
+    let mut parents = Vec::new();
+    if let Some(p) = head_commit_oid {
+        parents.push(p);
+    }
+    if let Some(mp) = merge_head_oid {
+        if !parents.contains(&mp) {
+            parents.push(mp);
+        }
+    }
 
     let commit = Commit {
         tree: tree_oid,
@@ -1356,6 +1574,11 @@ fn cmd_commit(message: Option<String>) -> Result<()> {
         head_commit_oid.as_ref(),
         &ref_msg,
     )?;
+
+    // Clean up merge state files
+    let _ = std::fs::remove_file(git_dir.join("MERGE_HEAD"));
+    let _ = std::fs::remove_file(git_dir.join("MERGE_MSG"));
+    let _ = std::fs::remove_file(git_dir.join("MERGE_MODE"));
 
     let short_sha = &commit_oid.to_string()[..7];
     if parents.is_empty() {
@@ -1463,22 +1686,31 @@ fn cmd_diff(staged: bool) -> Result<()> {
         };
 
         // Detect staged renames: match deleted HEAD files with identical OID in new index entries
+        // Index deleted HEAD files by OID for O(N + M) matching
+        let index_paths: std::collections::HashSet<&str> =
+            index.entries().iter().map(|e| e.path.as_str()).collect();
+        let mut deleted_by_oid: std::collections::HashMap<&ObjectId, Vec<&str>> =
+            std::collections::HashMap::new();
+        for (p, (_mode, head_oid)) in &head_map {
+            if !index_paths.contains(p.as_str()) {
+                deleted_by_oid.entry(head_oid).or_default().push(p.as_str());
+            }
+        }
+
         let mut matched_deleted = std::collections::HashSet::new();
         let mut matched_new = std::collections::HashSet::new();
 
         for (i, entry) in index.entries().iter().enumerate() {
             if !head_map.contains_key(&entry.path) {
-                if let Some((del_path, _)) = head_map.iter().find(|(p, (_mode, head_oid))| {
-                    !index.entries().iter().any(|e| &e.path == *p)
-                        && !matched_deleted.contains(*p)
-                        && head_oid == &entry.oid
-                }) {
-                    matched_deleted.insert(del_path.clone());
-                    matched_new.insert(i);
-                    println!("diff --git a/{} b/{}", del_path, entry.path);
-                    println!("similarity index 100%");
-                    println!("rename from {}", del_path);
-                    println!("rename to {}", entry.path);
+                if let Some(candidates) = deleted_by_oid.get_mut(&entry.oid) {
+                    if let Some(del_path) = candidates.pop() {
+                        matched_deleted.insert(del_path.to_string());
+                        matched_new.insert(i);
+                        println!("diff --git a/{} b/{}", del_path, entry.path);
+                        println!("similarity index 100%");
+                        println!("rename from {}", del_path);
+                        println!("rename to {}", entry.path);
+                    }
                 }
             }
         }
@@ -2028,36 +2260,144 @@ fn checkout_tree_and_update_index(
     repo_root: &Path,
     store: &impl oxidize_core::ObjectReader,
     index: &mut Index,
+    head_tree_oid: Option<&ObjectId>,
     target_tree_oid: &ObjectId,
+    force: bool,
 ) -> Result<()> {
     let target_map = flatten_tree(store, target_tree_oid, "")?;
 
-    // 1. Remove files from working tree that are in old index but not in new target tree
+    // Preflight: validate every target path and index path before mutating anything
+    for path in target_map.keys() {
+        oxidize_core::safe_join(repo_root, path)?;
+    }
     for entry in index.entries() {
-        if !target_map.contains_key(&entry.path) {
-            let full_path = repo_root.join(&entry.path);
-            if full_path.exists() {
-                let _ = std::fs::remove_file(&full_path);
-            }
-        }
+        oxidize_core::safe_join(repo_root, &entry.path)?;
     }
 
-    // 2. Write new files to working tree and create new index entries
-    index.entries.clear();
-    for (path, (_mode, oid)) in target_map {
-        let full_path = repo_root.join(&path);
-        if let Some(parent) = full_path.parent() {
-            std::fs::create_dir_all(parent)?;
+    let head_map = match head_tree_oid {
+        Some(oid) => flatten_tree(store, oid, "")?,
+        None => BTreeMap::new(),
+    };
+
+    if !force {
+        let mut dirty_paths = Vec::new();
+        let mut untracked_collisions = Vec::new();
+
+        // Collect all paths touched between HEAD and target
+        let mut touched_paths = BTreeSet::new();
+        for (p, target_val) in &target_map {
+            if head_map.get(p) != Some(target_val) {
+                touched_paths.insert(p.clone());
+            }
+        }
+        for p in head_map.keys() {
+            if !target_map.contains_key(p) {
+                touched_paths.insert(p.clone());
+            }
         }
 
-        let obj = store.read_object(&oid)?;
-        if let Object::Blob(blob) = obj {
-            std::fs::write(&full_path, &blob.data)?;
+        for path in &touched_paths {
+            let full_path = oxidize_core::safe_join(repo_root, path)?;
+            if let Some(entry) = index.get_entry(path) {
+                if full_path.is_file() {
+                    let data = std::fs::read(&full_path)?;
+                    let wt_oid = ObjectId::hash_blob(&data);
+                    if wt_oid != entry.oid {
+                        dirty_paths.push(path.clone());
+                        continue;
+                    }
+                } else if !full_path.exists() && entry.stage == 0 {
+                    dirty_paths.push(path.clone());
+                    continue;
+                }
+
+                // Check staged changes vs HEAD
+                let head_val = head_map.get(path);
+                if head_val.map(|(_, oid)| *oid) != Some(entry.oid) {
+                    dirty_paths.push(path.clone());
+                }
+            } else if full_path.exists() {
+                // Untracked collision
+                untracked_collisions.push(path.clone());
+            }
         }
 
-        if let Ok(meta) = std::fs::metadata(&full_path) {
-            let entry = IndexEntry::from_fs_metadata(path, oid, &meta, 0);
-            index.add_entry(entry);
+        if !dirty_paths.is_empty() {
+            bail!(
+                "error: Your local changes to the following files would be overwritten by checkout:\n\t{}\nPlease commit your changes or stash them before you switch branches.\nAborting",
+                dirty_paths.join("\n\t")
+            );
+        }
+
+        if !untracked_collisions.is_empty() {
+            bail!(
+                "error: The following untracked working tree files would be overwritten by checkout:\n\t{}\nPlease move or remove them before you switch branches.\nAborting",
+                untracked_collisions.join("\n\t")
+            );
+        }
+
+        // Apply changes: only update paths that changed between HEAD and target
+        for path in &touched_paths {
+            let full_path = oxidize_core::safe_join(repo_root, path)?;
+            if let Some((_mode, oid)) = target_map.get(path) {
+                if let Some(parent) = full_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let obj = store.read_object(oid)?;
+                if let Object::Blob(blob) = obj {
+                    std::fs::write(&full_path, &blob.data)?;
+                }
+                if let Ok(meta) = std::fs::metadata(&full_path) {
+                    let entry = IndexEntry::from_fs_metadata(path.clone(), *oid, &meta, 0);
+                    index.add_entry(entry);
+                }
+            } else {
+                // Removed in target
+                if full_path.exists() {
+                    let _ = std::fs::remove_file(&full_path);
+                }
+                index.remove_entry(path);
+                let mut parent = full_path.parent();
+                while let Some(p) = parent {
+                    if p == repo_root || !p.starts_with(repo_root) {
+                        break;
+                    }
+                    if std::fs::remove_dir(p).is_err() {
+                        break;
+                    }
+                    parent = p.parent();
+                }
+            }
+        }
+    } else {
+        // Force checkout (e.g. clone or reset --hard)
+        // 1. Remove files from working tree that are in old index but not in new target tree
+        for entry in index.entries() {
+            if !target_map.contains_key(&entry.path) {
+                let full_path = oxidize_core::safe_join(repo_root, &entry.path)?;
+                if full_path.exists() {
+                    let _ = std::fs::remove_file(&full_path);
+                }
+            }
+        }
+
+        // 2. Write new files to working tree and create new index entries
+        index.entries.clear();
+        for (path, (_mode, oid)) in target_map {
+            let full_path = oxidize_core::safe_join(repo_root, &path)?;
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            let obj = store.read_object(&oid)?;
+            if let Object::Blob(blob) = obj {
+                std::fs::write(&full_path, &blob.data)?;
+            }
+
+            if let Ok(meta) = std::fs::metadata(&full_path) {
+                let entry = IndexEntry::from_fs_metadata(path, oid, &meta, 0);
+                index.add_entry(entry);
+            }
         }
     }
 
@@ -2070,9 +2410,19 @@ fn cmd_branch(delete: bool, force_delete: bool, _all: bool, name: Option<String>
 
     if delete || force_delete {
         let branch_name = name.context("branch name required to delete")?;
-        let (active_branch, _) = ref_store.resolve_head()?;
+        let (active_branch, head_oid_opt) = ref_store.resolve_head()?;
         if active_branch == branch_name {
             bail!("cannot delete branch '{}' checked out", branch_name);
+        }
+        if !force_delete {
+            let branch_ref = format!("refs/heads/{}", branch_name);
+            let branch_oid = ref_store.read_ref(&branch_ref)?;
+            let store = RepoObjectStore::open(&git_dir)?;
+            let head_oid =
+                head_oid_opt.context("cannot verify branch merge status: HEAD has no commits")?;
+            if !is_ancestor(&store, &branch_oid, &head_oid)? {
+                bail!("The branch '{}' is not fully merged.\nIf you are sure you want to delete it, run 'ox branch -D {}'.", branch_name, branch_name);
+            }
         }
         ref_store.delete_branch(&branch_name)?;
         println!("Deleted branch {}.", branch_name);
@@ -2104,7 +2454,7 @@ fn cmd_branch(delete: bool, force_delete: bool, _all: bool, name: Option<String>
 fn cmd_checkout(create_branch: Option<String>, target: Option<String>) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
     let repo_root = git_dir.parent().context("git_dir has no parent")?;
-    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let store = RepoObjectStore::open(&git_dir)?;
     let ref_store = RefStore::new(&git_dir);
     let index_path = git_dir.join("index");
     let mut index = Index::load_from(&index_path)?;
@@ -2120,6 +2470,17 @@ fn cmd_checkout(create_branch: Option<String>, target: Option<String>) -> Result
 
     let target = target.context("branch or commit target required")?;
 
+    let head_tree_oid = match ref_store.resolve_head()?.1 {
+        Some(head_oid) => {
+            if let Ok(Object::Commit(c)) = store.read_object(&head_oid) {
+                Some(c.tree)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+
     // Check if target is a branch name
     let branch_ref = format!("refs/heads/{}", target);
     if let Ok(commit_oid) = ref_store.read_ref(&branch_ref) {
@@ -2129,7 +2490,14 @@ fn cmd_checkout(create_branch: Option<String>, target: Option<String>) -> Result
             _ => bail!("object {} is not a commit", commit_oid),
         };
 
-        checkout_tree_and_update_index(repo_root, &store, &mut index, &commit.tree)?;
+        checkout_tree_and_update_index(
+            repo_root,
+            &store,
+            &mut index,
+            head_tree_oid.as_ref(),
+            &commit.tree,
+            false,
+        )?;
         index.write_to(&index_path)?;
         ref_store.set_head_symbolic(&target)?;
         println!("Switched to branch '{}'", target);
@@ -2144,7 +2512,14 @@ fn cmd_checkout(create_branch: Option<String>, target: Option<String>) -> Result
             _ => bail!("object {} is not a commit", commit_oid),
         };
 
-        checkout_tree_and_update_index(repo_root, &store, &mut index, &commit.tree)?;
+        checkout_tree_and_update_index(
+            repo_root,
+            &store,
+            &mut index,
+            head_tree_oid.as_ref(),
+            &commit.tree,
+            false,
+        )?;
         index.write_to(&index_path)?;
         ref_store.set_head_detached(&commit_oid)?;
         println!(
@@ -2168,13 +2543,42 @@ fn cmd_switch(create: Option<String>, branch: Option<String>) -> Result<()> {
     }
 }
 
-fn cmd_merge(commit_arg: String) -> Result<()> {
+fn cmd_merge(abort: bool, commit_opt: Option<String>) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
     let repo_root = git_dir.parent().context("git_dir has no parent")?;
     let store = RepoObjectStore::open(&git_dir)?;
     let ref_store = RefStore::new(&git_dir);
     let index_path = git_dir.join("index");
     let mut index = Index::load_from(&index_path)?;
+
+    if abort {
+        let merge_head_file = git_dir.join("MERGE_HEAD");
+        if !merge_head_file.exists() {
+            bail!("fatal: There is no merge to abort (MERGE_HEAD missing).");
+        }
+        let (_, our_oid_opt) = ref_store.resolve_head()?;
+        let our_oid = our_oid_opt.context("cannot abort merge: HEAD has no commits")?;
+        let our_commit = match store.read_object(&our_oid)? {
+            Object::Commit(c) => c,
+            _ => bail!("HEAD commit not found"),
+        };
+        checkout_tree_and_update_index(
+            repo_root,
+            &store,
+            &mut index,
+            None,
+            &our_commit.tree,
+            true,
+        )?;
+        index.write_to(&index_path)?;
+        let _ = std::fs::remove_file(git_dir.join("MERGE_HEAD"));
+        let _ = std::fs::remove_file(git_dir.join("MERGE_MSG"));
+        let _ = std::fs::remove_file(git_dir.join("MERGE_MODE"));
+        println!("Merge aborted.");
+        return Ok(());
+    }
+
+    let commit_arg = commit_opt.context("commit or branch name required to merge")?;
 
     let (our_branch, our_oid_opt) = ref_store.resolve_head()?;
     let our_oid = our_oid_opt.context("cannot merge: HEAD has no commits")?;
@@ -2202,7 +2606,14 @@ fn cmd_merge(commit_arg: String) -> Result<()> {
 
     if merge_base == our_oid {
         // Fast-forward merge!
-        checkout_tree_and_update_index(repo_root, &store, &mut index, &their_commit.tree)?;
+        checkout_tree_and_update_index(
+            repo_root,
+            &store,
+            &mut index,
+            Some(&our_commit.tree),
+            &their_commit.tree,
+            false,
+        )?;
         index.write_to(&index_path)?;
         ref_store.update_ref(
             &our_branch,
@@ -2241,42 +2652,172 @@ fn cmd_merge(commit_arg: String) -> Result<()> {
     }
 
     let mut had_conflicts = false;
+    let mut conflict_paths = Vec::new();
 
     for path in all_paths {
-        let base_text = get_blob_text(&store, base_files.get(&path).map(|(_, id)| id));
-        let our_text = get_blob_text(&store, our_files.get(&path).map(|(_, id)| id));
-        let their_text = get_blob_text(&store, their_files.get(&path).map(|(_, id)| id));
+        let base_entry = base_files.get(&path).copied();
+        let our_entry = our_files.get(&path).copied();
+        let their_entry = their_files.get(&path).copied();
 
-        let merged = three_way_merge(&base_text, &our_text, &their_text, "HEAD", &commit_arg);
+        // 1. Identical on both sides
+        if our_entry == their_entry {
+            continue;
+        }
+
+        // 2. Changed only in theirs
+        if base_entry == our_entry {
+            let full_path = repo_root.join(&path);
+            if let Some((_their_mode, their_oid)) = their_entry {
+                let (_, data) = store.read_raw(&their_oid)?;
+                if let Some(parent) = full_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&full_path, &data)?;
+                let meta = std::fs::metadata(&full_path)?;
+                index.add_entry(IndexEntry::from_fs_metadata(
+                    path.clone(),
+                    their_oid,
+                    &meta,
+                    0,
+                ));
+            } else {
+                if full_path.exists() {
+                    let _ = std::fs::remove_file(&full_path);
+                }
+                index.remove_entry(&path);
+            }
+            continue;
+        }
+
+        // 3. Changed only in ours
+        if base_entry == their_entry {
+            continue;
+        }
+
+        // 4. Both changed!
         let full_path = repo_root.join(&path);
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
+        // Check modify/delete conflict
+        if our_entry.is_none() || their_entry.is_none() {
+            had_conflicts = true;
+            conflict_paths.push(path.clone());
+            println!("CONFLICT (modify/delete): Merge conflict in {}", path);
+
+            index.remove_entry(&path);
+            if let Some((mode, oid)) = base_entry {
+                let mut e = IndexEntry::new(path.clone(), oid, mode.0);
+                e.stage = 1;
+                index.add_entry(e);
+            }
+            if let Some((mode, oid)) = our_entry {
+                let mut e = IndexEntry::new(path.clone(), oid, mode.0);
+                e.stage = 2;
+                index.add_entry(e);
+            }
+            if let Some((mode, oid)) = their_entry {
+                let mut e = IndexEntry::new(path.clone(), oid, mode.0);
+                e.stage = 3;
+                index.add_entry(e);
+            }
+            continue;
+        }
+
+        let (our_mode, our_oid) = our_entry.unwrap();
+        let (their_mode, their_oid) = their_entry.unwrap();
+
+        let our_bytes = store.read_raw(&our_oid)?.1;
+        let their_bytes = store.read_raw(&their_oid)?.1;
+        let base_bytes = if let Some((_, base_oid)) = base_entry {
+            store.read_raw(&base_oid)?.1
+        } else {
+            Vec::new()
+        };
+
+        // Binary check
+        let is_bin = oxidize_diff::is_binary_content(&our_bytes)
+            || oxidize_diff::is_binary_content(&their_bytes)
+            || oxidize_diff::is_binary_content(&base_bytes);
+
+        let our_str_res = std::str::from_utf8(&our_bytes);
+        let their_str_res = std::str::from_utf8(&their_bytes);
+        let base_str_res = std::str::from_utf8(&base_bytes);
+
+        if is_bin || our_str_res.is_err() || their_str_res.is_err() || base_str_res.is_err() {
+            had_conflicts = true;
+            conflict_paths.push(path.clone());
+            println!("CONFLICT (content): Merge conflict in {}", path);
+            println!("warning: Cannot merge binary files: {}", path);
+
+            // Write our version to worktree to avoid corrupting binary data
+            std::fs::write(&full_path, &our_bytes)?;
+
+            index.remove_entry(&path);
+            if let Some((mode, oid)) = base_entry {
+                let mut e = IndexEntry::new(path.clone(), oid, mode.0);
+                e.stage = 1;
+                index.add_entry(e);
+            }
+            let mut e2 = IndexEntry::new(path.clone(), our_oid, our_mode.0);
+            e2.stage = 2;
+            index.add_entry(e2);
+            let mut e3 = IndexEntry::new(path.clone(), their_oid, their_mode.0);
+            e3.stage = 3;
+            index.add_entry(e3);
+            continue;
+        }
+
+        let our_str = our_str_res.unwrap();
+        let their_str = their_str_res.unwrap();
+        let base_str = base_str_res.unwrap();
+
+        let merged = three_way_merge(base_str, our_str, their_str, "HEAD", &commit_arg);
         std::fs::write(&full_path, merged.content.as_bytes())?;
 
-        let blob = Object::Blob(Blob::new(merged.content.into_bytes()));
-        let blob_oid = store.write_object(&blob)?;
-        if let Ok(meta) = std::fs::metadata(&full_path) {
-            let stage = if merged.has_conflicts { 1 } else { 0 };
+        if merged.has_conflicts {
+            had_conflicts = true;
+            conflict_paths.push(path.clone());
+            println!("CONFLICT (content): Merge conflict in {}", path);
+
+            index.remove_entry(&path);
+            if let Some((mode, oid)) = base_entry {
+                let mut e = IndexEntry::new(path.clone(), oid, mode.0);
+                e.stage = 1;
+                index.add_entry(e);
+            }
+            let mut e2 = IndexEntry::new(path.clone(), our_oid, our_mode.0);
+            e2.stage = 2;
+            index.add_entry(e2);
+            let mut e3 = IndexEntry::new(path.clone(), their_oid, their_mode.0);
+            e3.stage = 3;
+            index.add_entry(e3);
+        } else {
+            let blob = Object::Blob(Blob::new(merged.content.into_bytes()));
+            let blob_oid = store.loose().write_object(&blob)?;
+            let meta = std::fs::metadata(&full_path)?;
             index.add_entry(IndexEntry::from_fs_metadata(
                 path.clone(),
                 blob_oid,
                 &meta,
-                stage,
+                0,
             ));
-        }
-
-        if merged.has_conflicts {
-            had_conflicts = true;
-            println!("CONFLICT (content): Merge conflict in {}", path);
         }
     }
 
     index.write_to(&index_path)?;
 
     if had_conflicts {
+        std::fs::write(git_dir.join("MERGE_HEAD"), format!("{}\n", their_oid))?;
+        let msg = format!(
+            "Merge branch '{}'\n\n# Conflicts:\n#\t{}\n",
+            commit_arg,
+            conflict_paths.join("\n#\t")
+        );
+        std::fs::write(git_dir.join("MERGE_MSG"), msg)?;
         println!("Automatic merge failed; fix conflicts and then commit the result.");
+        bail!("Automatic merge failed; fix conflicts and then commit the result.");
     } else {
         // Automatic merge commit
         let tree_oid = write_tree(&index, store.loose())?;
@@ -2289,7 +2830,7 @@ fn cmd_merge(commit_arg: String) -> Result<()> {
             gpg_sig: None,
             message: format!("Merge branch '{}'\n", commit_arg),
         };
-        let merge_oid = store.write_object(&Object::Commit(merge_commit))?;
+        let merge_oid = store.loose().write_object(&Object::Commit(merge_commit))?;
         ref_store.update_ref(
             &our_branch,
             &merge_oid,
@@ -2339,7 +2880,14 @@ fn cmd_reset(hard: bool, soft: bool, _mixed: bool, commit_arg: Option<String>) -
     }
 
     if hard {
-        checkout_tree_and_update_index(repo_root, &store, &mut index, &target_commit.tree)?;
+        checkout_tree_and_update_index(
+            repo_root,
+            &store,
+            &mut index,
+            None,
+            &target_commit.tree,
+            true,
+        )?;
         index.write_to(&index_path)?;
         ref_store.update_ref(
             &active_branch,
@@ -2855,7 +3403,14 @@ fn cmd_clone(repository: String, directory: Option<String>) -> Result<()> {
         if let Object::Commit(commit) = obj {
             let index_path = git_dir.join("index");
             let mut index = Index::new();
-            checkout_tree_and_update_index(&target_path, &store, &mut index, &commit.tree)?;
+            checkout_tree_and_update_index(
+                &target_path,
+                &store,
+                &mut index,
+                None,
+                &commit.tree,
+                true,
+            )?;
             index.write_to(&index_path)?;
         }
     }
@@ -2968,11 +3523,42 @@ fn cmd_pull(remote_opt: Option<String>, branch_opt: Option<String>) -> Result<()
     let target_ref = format!("refs/remotes/{}/{}", remote_name, branch_name);
     let target_oid = ref_store.read_ref(&target_ref)?;
 
-    cmd_merge(target_oid.to_string())?;
+    cmd_merge(false, Some(target_oid.to_string()))?;
     Ok(())
 }
 
-fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>) -> Result<()> {
+fn is_ancestor(
+    store: &impl ObjectReader,
+    ancestor: &ObjectId,
+    descendant: &ObjectId,
+) -> Result<bool> {
+    if ancestor == descendant {
+        return Ok(true);
+    }
+    use std::collections::{HashSet, VecDeque};
+    let mut queue = VecDeque::new();
+    let mut visited = HashSet::new();
+
+    queue.push_back(*descendant);
+    visited.insert(*descendant);
+
+    while let Some(curr) = queue.pop_front() {
+        if curr == *ancestor {
+            return Ok(true);
+        }
+        if let Ok(Object::Commit(c)) = store.read_object(&curr) {
+            for p in c.parents {
+                if visited.insert(p) {
+                    queue.push_back(p);
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>, force: bool) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
     let config_path = git_dir.join("config");
     let config = GitConfig::load_from_file(&config_path).unwrap_or_default();
@@ -2996,19 +3582,20 @@ fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>) -> Result<()
     let local_ref_name = format!("refs/heads/{}", branch);
     let local_oid = ref_store.read_ref(&local_ref_name)?;
 
-    // Discover remote refs
-    let (remote_refs, is_local, is_ssh) = if let Some(local_path) = resolve_local_path(url) {
-        let (refs, _) = discover_local_refs(&local_path)?;
-        (refs, Some(local_path), false)
-    } else if is_ssh_url(url) {
-        let client = SshClient::new();
-        let (refs, _) = client.discover_receive_pack(url)?;
-        (refs, None, true)
-    } else {
-        let client = SmartHttpClient::new();
-        let (refs, _) = client.discover_receive_pack(url)?;
-        (refs, None, false)
-    };
+    // Discover remote refs and capabilities
+    let (remote_refs, server_caps, is_local, is_ssh) =
+        if let Some(local_path) = resolve_local_path(url) {
+            let (refs, _) = discover_local_refs(&local_path)?;
+            (refs, Vec::new(), Some(local_path), false)
+        } else if is_ssh_url(url) {
+            let client = SshClient::new();
+            let (refs, caps) = client.discover_receive_pack(url)?;
+            (refs, caps, None, true)
+        } else {
+            let client = SmartHttpClient::new();
+            let (refs, caps) = client.discover_receive_pack(url)?;
+            (refs, caps, None, false)
+        };
 
     let remote_target_name = format!("refs/heads/{}", branch);
     let remote_old_oid = remote_refs
@@ -3017,10 +3604,58 @@ fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>) -> Result<()
         .map(|r| r.oid)
         .unwrap_or(ObjectId::ZERO);
 
-    // Pack objects reachable from local_oid
+    // 1. Up-to-date check
+    if !remote_old_oid.is_zero() && remote_old_oid == local_oid {
+        println!("Everything up-to-date");
+        return Ok(());
+    }
+
     let store = RepoObjectStore::open(&git_dir)?;
-    let all_objects = store.collect_all_objects()?;
-    let (pack_bytes, _, _) = write_pack(&all_objects, true)?;
+
+    // 2. Fast-forward ancestry check
+    let is_ff = if remote_old_oid.is_zero() {
+        true
+    } else {
+        is_ancestor(&store, &remote_old_oid, &local_oid)?
+    };
+
+    if !is_ff && !force {
+        anyhow::bail!(
+            "fatal: Updates were rejected because the remote contains work that you do \
+             not have locally. This is usually caused by another repository pushing to \
+             the same ref. You may want to first integrate the remote changes before pushing again.\n\
+             hint: See the 'Note about fast-forwards' in 'git push --help' for details.\n\
+             hint: Use --force to overwrite."
+        );
+    }
+
+    // 3. Checked-out branch protection on local non-bare destination
+    if let Some(ref dest_path) = is_local {
+        if dest_path.join(".git").is_dir() {
+            let dest_git_dir = dest_path.join(".git");
+            let dest_ref_store = RefStore::new(&dest_git_dir);
+            if let Ok((dest_head, _)) = dest_ref_store.resolve_head() {
+                let is_checked_out = dest_head == remote_target_name
+                    || format!("refs/heads/{}", dest_head) == remote_target_name;
+                if is_checked_out {
+                    anyhow::bail!(
+                        "fatal: refusing to update checked out branch: {}\n\
+                         By default, updating the current branch in a non-bare repository is denied.",
+                        remote_target_name
+                    );
+                }
+            }
+        }
+    }
+
+    // 4. Pack only reachable objects required from local_oid, excluding haves
+    let haves = if remote_old_oid.is_zero() {
+        Vec::new()
+    } else {
+        vec![remote_old_oid]
+    };
+    let objects = store.collect_reachable_objects(&[local_oid], &haves)?;
+    let (pack_bytes, _, _) = write_pack(&objects, true)?;
 
     if let Some(dest_path) = is_local {
         // Local destination repository
@@ -3030,37 +3665,59 @@ fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>) -> Result<()
             dest_path.clone()
         };
 
-        // Write pack to destination
-        let (indexed_objs, pack_checksum) = index_packfile(&pack_bytes)?;
-        let pack_dir = dest_git_dir.join("objects").join("pack");
-        std::fs::create_dir_all(&pack_dir)?;
-        let pack_file = pack_dir.join(format!("pack-{}.pack", pack_checksum));
-        let idx_file = pack_dir.join(format!("pack-{}.idx", pack_checksum));
-        std::fs::write(&pack_file, &pack_bytes)?;
-        PackIndex::write_to(indexed_objs, &pack_checksum, &idx_file)?;
+        if !pack_bytes.is_empty() {
+            // Write pack to destination
+            let (indexed_objs, pack_checksum) = index_packfile(&pack_bytes)?;
+            let pack_dir = dest_git_dir.join("objects").join("pack");
+            std::fs::create_dir_all(&pack_dir)?;
+            let pack_file = pack_dir.join(format!("pack-{}.pack", pack_checksum));
+            let idx_file = pack_dir.join(format!("pack-{}.idx", pack_checksum));
+            std::fs::write(&pack_file, &pack_bytes)?;
+            PackIndex::write_to(indexed_objs, &pack_checksum, &idx_file)?;
+        }
 
-        // Update branch ref in destination
+        // Update branch ref in destination with CAS
         let dest_ref_store = RefStore::new(&dest_git_dir);
-        dest_ref_store.update_ref(&remote_target_name, &local_oid, None, "push: from local")?;
+        let expected_old = if force || remote_old_oid.is_zero() {
+            None
+        } else {
+            Some(remote_old_oid)
+        };
+        dest_ref_store.update_ref(
+            &remote_target_name,
+            &local_oid,
+            expected_old.as_ref(),
+            "push: from local",
+        )?;
     } else if is_ssh {
         let client = SshClient::new();
-        let report = client.push_pack(
+        let report = client.push_pack_with_caps(
             url,
             &[(&remote_old_oid, &local_oid, &remote_target_name)],
             &pack_bytes,
+            &server_caps,
         )?;
-        if !report.is_empty() {
-            println!("{}", report);
+        if !report.is_success() {
+            let summary = report.display_summary();
+            if !summary.is_empty() {
+                eprintln!("{}", summary);
+            }
+            anyhow::bail!("fatal: push rejected by remote");
         }
     } else {
         let client = SmartHttpClient::new();
-        let report = client.push_pack(
+        let report = client.push_pack_with_caps(
             url,
             &[(&remote_old_oid, &local_oid, &remote_target_name)],
             &pack_bytes,
+            &server_caps,
         )?;
-        if !report.is_empty() {
-            println!("{}", report);
+        if !report.is_success() {
+            let summary = report.display_summary();
+            if !summary.is_empty() {
+                eprintln!("{}", summary);
+            }
+            anyhow::bail!("fatal: push rejected by remote");
         }
     }
 
@@ -3073,6 +3730,11 @@ fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>) -> Result<()
         &format!("push: update tracking ref {}", remote_name),
     )?;
 
+    let force_flag = if force && !remote_old_oid.is_zero() && !is_ff {
+        "+"
+    } else {
+        " "
+    };
     let old_short = if remote_old_oid.is_zero() {
         "[new branch]".to_string()
     } else {
@@ -3083,7 +3745,7 @@ fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>) -> Result<()
         )
     };
     println!("To {}", url);
-    println!("   {} {} -> {}", old_short, branch, branch);
+    println!("  {}{} {} -> {}", force_flag, old_short, branch, branch);
 
     Ok(())
 }
@@ -3115,71 +3777,136 @@ fn cmd_remote(subcommand_opt: Option<RemoteCommand>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_rm(cached: bool, recursive: bool, _force: bool, files: Vec<String>) -> Result<()> {
+fn cmd_rm(cached: bool, recursive: bool, force: bool, files: Vec<String>) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
     let repo_root = git_dir.parent().context("git_dir has no parent")?;
+    let store = RepoObjectStore::open(&git_dir)?;
+    let ref_store = RefStore::new(&git_dir);
     let index_path = git_dir.join("index");
     let mut index = Index::load_from(&index_path)?;
 
-    for file_arg in files {
-        let p = Path::new(&file_arg);
+    // Resolve HEAD tree to check staged changes vs HEAD
+    let head_map = match ref_store.resolve_head()?.1 {
+        Some(head_oid) => {
+            if let Ok(Object::Commit(commit)) = store.read_object(&head_oid) {
+                flatten_tree(&store, &commit.tree, "").unwrap_or_default()
+            } else {
+                BTreeMap::new()
+            }
+        }
+        None => BTreeMap::new(),
+    };
+
+    // 1. Preflight: Resolve all file pathspecs to matched index entries
+    let mut files_to_remove: Vec<String> = Vec::new();
+    let current_dir = std::env::current_dir()?;
+
+    for file_arg in &files {
+        let p = Path::new(file_arg);
         let abs_path = if p.is_relative() {
-            std::env::current_dir()?.join(p)
+            current_dir.join(p)
         } else {
             p.to_path_buf()
         };
 
-        let rel_path = abs_path
-            .strip_prefix(repo_root)
-            .with_context(|| format!("path '{}' is outside repository root", file_arg))?
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel_path = match abs_path.strip_prefix(repo_root) {
+            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+            Err(_) => bail!("path '{}' is outside repository root", file_arg),
+        };
 
-        let mut matched = false;
         let dir_prefix = format!("{}/", rel_path);
+        let mut matched = false;
 
         if index.get_entry(&rel_path).is_some() {
-            index.remove_entry(&rel_path);
-            if !cached {
-                let full_path = repo_root.join(&rel_path);
-                if full_path.exists() {
-                    let _ = std::fs::remove_file(&full_path);
-                }
+            if !files_to_remove.contains(&rel_path) {
+                files_to_remove.push(rel_path.clone());
             }
-            println!("rm '{}'", rel_path);
             matched = true;
         } else if recursive {
-            let paths_to_remove: Vec<String> = index
+            let matched_paths: Vec<String> = index
                 .entries()
                 .iter()
                 .filter(|e| e.path.starts_with(&dir_prefix))
                 .map(|e| e.path.clone())
                 .collect();
-
-            if !paths_to_remove.is_empty() {
+            if !matched_paths.is_empty() {
+                for mp in matched_paths {
+                    if !files_to_remove.contains(&mp) {
+                        files_to_remove.push(mp);
+                    }
+                }
                 matched = true;
-                for path in paths_to_remove {
-                    index.remove_entry(&path);
-                    if !cached {
-                        let full_path = repo_root.join(&path);
-                        if full_path.exists() {
-                            let _ = std::fs::remove_file(&full_path);
-                        }
-                    }
-                    println!("rm '{}'", path);
-                }
-                if !cached {
-                    let full_dir = repo_root.join(&rel_path);
-                    if full_dir.is_dir() {
-                        let _ = std::fs::remove_dir_all(full_dir);
-                    }
-                }
             }
         }
 
         if !matched {
             bail!("fatal: pathspec '{}' did not match any files", file_arg);
         }
+    }
+
+    // 2. Preflight dirty checks (if !force)
+    if !force {
+        let mut dirty_files = Vec::new();
+
+        for rel_path in &files_to_remove {
+            let entry = index.get_entry(rel_path).unwrap();
+            let full_path = oxidize_core::safe_join(repo_root, rel_path)?;
+
+            // Case A: Worktree modified compared to index (if not cached)
+            if !cached && full_path.is_file() {
+                let data = std::fs::read(&full_path)?;
+                let wt_oid = ObjectId::hash_blob(&data);
+                if wt_oid != entry.oid {
+                    dirty_files.push(rel_path.clone());
+                    continue;
+                }
+            }
+
+            // Case B: Staged changes compared to HEAD
+            let head_entry = head_map.get(rel_path);
+            let head_oid = head_entry.map(|(_, oid)| *oid);
+            if head_oid != Some(entry.oid) {
+                if !cached {
+                    dirty_files.push(rel_path.clone());
+                } else if full_path.is_file() {
+                    let data = std::fs::read(&full_path)?;
+                    let wt_oid = ObjectId::hash_blob(&data);
+                    if wt_oid != entry.oid {
+                        dirty_files.push(rel_path.clone());
+                    }
+                }
+            }
+        }
+
+        if !dirty_files.is_empty() {
+            bail!(
+                "error: the following file has local modifications:\n    {}\n(use --cached to keep the file, or -f to force removal)",
+                dirty_files.join("\n    ")
+            );
+        }
+    }
+
+    // 3. Execution: remove from index, and remove from worktree if !cached
+    for rel_path in &files_to_remove {
+        index.remove_entry(rel_path);
+        if !cached {
+            let full_path = oxidize_core::safe_join(repo_root, rel_path)?;
+            if full_path.exists() {
+                let _ = std::fs::remove_file(&full_path);
+            }
+            // Clean up empty directories only
+            let mut parent = full_path.parent();
+            while let Some(p) = parent {
+                if p == repo_root || !p.starts_with(repo_root) {
+                    break;
+                }
+                if std::fs::remove_dir(p).is_err() {
+                    break; // Directory is not empty, stop climbing
+                }
+                parent = p.parent();
+            }
+        }
+        println!("rm '{}'", rel_path);
     }
 
     index.write_to(&index_path)?;
@@ -3412,10 +4139,7 @@ fn cmd_tag(
 fn cmd_stash(subcommand_opt: Option<StashCommand>) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
     let repo_root = git_dir.parent().context("git_dir has no parent")?;
-    let store = LooseObjectStore::new(git_dir.join("objects"));
     let ref_store = RefStore::new(&git_dir);
-    let index_path = git_dir.join("index");
-    let mut index = Index::load_from(&index_path)?;
 
     match subcommand_opt {
         None | Some(StashCommand::Push { .. }) => {
@@ -3424,124 +4148,41 @@ fn cmd_stash(subcommand_opt: Option<StashCommand>) -> Result<()> {
             } else {
                 None
             };
-
-            let (branch_name, head_oid_opt) = ref_store.resolve_head()?;
-            let head_oid = head_oid_opt.context("cannot stash: HEAD has no commit")?;
-            let head_commit = match store.read_object(&head_oid)? {
-                Object::Commit(c) => c,
-                _ => bail!("HEAD is not a commit"),
-            };
-
-            let status = compute_status(repo_root, &index, Some(&head_commit.tree), &store)?;
-            if status.staged.is_empty() && status.unstaged.is_empty() {
-                println!("No local changes to save");
-                return Ok(());
-            }
-
-            let sig = get_default_signature(Some(&git_dir));
-            let head_short = &head_oid.to_string()[..7];
-            let head_first_line = head_commit.message.lines().next().unwrap_or("");
-
-            let index_tree_oid = write_tree(&index, &store)?;
-            let index_commit = Commit {
-                tree: index_tree_oid,
-                parents: vec![head_oid],
-                author: sig.clone(),
-                committer: sig.clone(),
-                gpg_sig: None,
-                message: format!(
-                    "index on {}: {} {}\n",
-                    branch_name, head_short, head_first_line
-                ),
-            };
-            let index_commit_oid = store.write_object(&Object::Commit(index_commit))?;
-
-            let mut work_index = index.clone();
-            for change in &status.unstaged {
-                match change {
-                    UnstagedChange::Modified(p) => {
-                        let full = repo_root.join(p);
-                        if let Ok(data) = std::fs::read(&full) {
-                            let oid = store.write_blob(&data)?;
-                            if let Ok(meta) = std::fs::metadata(&full) {
-                                work_index.add_entry(IndexEntry::from_fs_metadata(
-                                    p.clone(),
-                                    oid,
-                                    &meta,
-                                    0,
-                                ));
-                            }
-                        }
-                    }
-                    UnstagedChange::Deleted(p) => {
-                        work_index.remove_entry(p);
-                    }
-                }
-            }
-            let work_tree_oid = write_tree(&work_index, &store)?;
-
-            let stash_msg = custom_msg.unwrap_or_else(|| {
-                format!(
-                    "WIP on {}: {} {}\n",
-                    branch_name, head_short, head_first_line
-                )
-            });
-
-            let stash_commit = Commit {
-                tree: work_tree_oid,
-                parents: vec![head_oid, index_commit_oid],
-                author: sig.clone(),
-                committer: sig,
-                gpg_sig: None,
-                message: stash_msg.clone(),
-            };
-            let stash_oid = store.write_object(&Object::Commit(stash_commit))?;
-
-            ref_store.update_ref(
-                "refs/stash",
-                &stash_oid,
-                None,
-                &format!("WIP on {}: {}", branch_name, stash_msg.trim()),
-            )?;
-
-            checkout_tree_and_update_index(repo_root, &store, &mut index, &head_commit.tree)?;
-            index.write_to(&index_path)?;
-
+            let msg = custom_msg.as_deref().unwrap_or("");
+            let _stash_oid = oxidize_tui::ops::stash_save(repo_root, &git_dir, msg)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             println!(
                 "Saved working directory and index state {}",
-                stash_msg.trim()
+                if msg.is_empty() { "WIP" } else { msg }
             );
         }
         Some(StashCommand::List) => {
-            let reflog = ref_store.read_reflog("refs/stash")?;
-            for (idx, entry) in reflog.iter().rev().enumerate() {
+            let list = ref_store.stash_list()?;
+            for (idx, entry) in list.iter().enumerate() {
                 println!("stash@{{{}}}: {}", idx, entry.message);
             }
         }
         Some(StashCommand::Pop) => {
-            let stash_oid = ref_store
-                .read_ref("refs/stash")
-                .map_err(|_| anyhow::anyhow!("No stash entries found."))?;
+            let idx = 0;
+            let list = ref_store.stash_list()?;
+            let entry = list.get(idx).context("No stash entries found.")?;
+            let stash_oid = entry.new_oid;
 
-            let stash_commit = match store.read_object(&stash_oid)? {
-                Object::Commit(c) => c,
-                _ => bail!("stash is not a commit"),
-            };
-
-            checkout_tree_and_update_index(repo_root, &store, &mut index, &stash_commit.tree)?;
-            index.write_to(&index_path)?;
-
-            let stash_file = git_dir.join("refs").join("stash");
-            let _ = std::fs::remove_file(stash_file);
-            println!("Dropped refs/stash@{{0}} ({})", stash_oid);
-        }
-        Some(StashCommand::Drop { index: idx_opt }) => {
-            let idx = idx_opt.unwrap_or(0);
-            let stash_file = git_dir.join("refs").join("stash");
-            if stash_file.exists() {
-                let _ = std::fs::remove_file(stash_file);
+            let clean = oxidize_tui::ops::pop_stash(repo_root, &git_dir, idx, &stash_oid)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            if clean {
+                println!("Dropped refs/stash@{{{}}} ({})", idx, stash_oid);
+            } else {
+                println!("CONFLICT: Merge conflict in stashed files.");
+                println!("The stash entry is kept in case you need it again.");
+                bail!("merge conflict when popping stash");
             }
-            println!("Dropped refs/stash@{{{}}}", idx);
+        }
+        Some(StashCommand::Drop { index }) => {
+            let idx = index.unwrap_or(0);
+            let dropped_oid = oxidize_tui::ops::drop_stash(&git_dir, idx)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!("Dropped refs/stash@{{{}}} ({})", idx, dropped_oid);
         }
     }
 
@@ -3569,7 +4210,14 @@ fn cmd_rebase(upstream_arg: String) -> Result<()> {
             Object::Commit(c) => c,
             _ => bail!("upstream is not a commit"),
         };
-        checkout_tree_and_update_index(repo_root, &store, &mut index, &up_commit.tree)?;
+        checkout_tree_and_update_index(
+            repo_root,
+            &store,
+            &mut index,
+            None,
+            &up_commit.tree,
+            false,
+        )?;
         index.write_to(&index_path)?;
         ref_store.update_ref(
             &format!("refs/heads/{}", active_branch),
@@ -3609,7 +4257,7 @@ fn cmd_rebase(upstream_arg: String) -> Result<()> {
         _ => bail!("upstream is not a commit"),
     };
 
-    checkout_tree_and_update_index(repo_root, &store, &mut index, &up_commit.tree)?;
+    checkout_tree_and_update_index(repo_root, &store, &mut index, None, &up_commit.tree, true)?;
 
     for (_orig_oid, commit) in commits_to_replay {
         let base_oid = commit.parents[0];

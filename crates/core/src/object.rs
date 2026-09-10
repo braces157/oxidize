@@ -105,6 +105,20 @@ impl Blob {
     pub fn new(data: Vec<u8>) -> Self {
         Self { data }
     }
+
+    /// Computes the Git blob SHA-1 ObjectId for the given raw data bytes.
+    pub fn hash(data: &[u8]) -> ObjectId {
+        let header = format!("blob {}\0", data.len());
+        let mut hasher = Sha1::new();
+        hasher.update(header.as_bytes());
+        hasher.update(data);
+        ObjectId::from_bytes(hasher.finalize().into())
+    }
+
+    /// Computes the ObjectId of this blob.
+    pub fn id(&self) -> ObjectId {
+        Self::hash(&self.data)
+    }
 }
 
 /// An entry within a Git Tree object.

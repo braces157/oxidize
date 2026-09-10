@@ -47,6 +47,18 @@ pub enum CoreError {
     #[error("not a git repository (or any of the parent directories): .git")]
     RepoNotFound,
 
+    /// Invalid repository path (e.g. traversal, absolute, targeting .git, invalid characters).
+    #[error("invalid repository path: {0}")]
+    InvalidPath(String),
+
+    /// Invalid reference name.
+    #[error("invalid reference name: {0}")]
+    InvalidRefName(String),
+
+    /// Lock file error (lock contention or acquisition failure).
+    #[error("lock error: {0}")]
+    LockError(String),
+
     /// Standard I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

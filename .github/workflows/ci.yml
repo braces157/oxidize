@@ -66,3 +66,19 @@ jobs:
 
       - name: Verify Documentation Build
         run: cargo doc --workspace --no-deps
+
+  msrv:
+    name: MSRV Check (1.88 --locked)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.88 toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify MSRV compilation
+        run: cargo check --workspace --all-targets --locked
