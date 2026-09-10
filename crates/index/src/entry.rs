@@ -2,7 +2,6 @@
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use oxidize_core::id::ObjectId;
-use oxidize_core::object::FileMode;
 use std::io::{Read, Write};
 use std::time::SystemTime;
 
@@ -85,7 +84,7 @@ impl IndexEntry {
         #[cfg(not(unix))]
         let (dev, ino, uid, gid, mode) = {
             // Windows fallback defaults: Git for Windows uses mode 100644 for regular files
-            (0, 0, 0, 0, FileMode::REGULAR.0)
+            (0, 0, 0, 0, 0o100644)
         };
 
         Self {

@@ -27,12 +27,15 @@ fn run_cmd(cmd: &str, args: &[&str], cwd: &Path) -> String {
 }
 
 fn ox_bin() -> String {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_ox") {
+        return path;
+    }
     let mut path = std::env::current_exe().expect("current exe path");
     path.pop();
-    if path.ends_with("deps") {
+    if path.file_name().and_then(|n| n.to_str()) == Some("deps") {
         path.pop();
     }
-    path.push("ox");
+    path.push(if cfg!(windows) { "ox.exe" } else { "ox" });
     path.to_string_lossy().to_string()
 }
 
