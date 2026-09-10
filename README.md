@@ -8,7 +8,9 @@
 ## Highlights
 
 - **100% Byte-Compatible with Official Git**: Interoperates seamlessly with real Git repositories. Run `ox commit` and inspect with `git log`, or clone with `ox clone` and branch with `git checkout`.
-- **Zero-Toy Full Implementation**: Real Git object model (Blobs, Trees, Commits, Tags), binary Index v2 (`DIRC`), Packfile v2 (`PACK`), Pack Index v2 (`.idx` v2), Smart HTTP network protocol, and comprehensive porcelain.
+- **Zero-Toy Full Implementation**: Real Git object model (Blobs, Trees, Commits, Tags), binary Index v2 & v4 (`DIRC`), Packfile v2 (`PACK`), Pack Index v2 (`.idx` v2), Smart HTTP & Native SSH protocols, and comprehensive porcelain.
+- **Developer-Ready Command Aliases**: Built-in standard Git aliases (`st`, `co`, `ci`, `br`, `df`, `rb`, `cp`) and custom alias expansion loaded directly from repository `.git/config` and global `~/.gitconfig`.
+- **Exact Rename Detection**: Automatically pairs deleted and added files with identical content in `ox status` (`renamed: old -> new`) and `ox diff --staged` with canonical Git rename headers (`similarity index 100%`).
 - **High Performance & Multi-Threaded**: Parallel loose object scanning and hashing during `ox add`, and parallel sliding delta window compression during `ox pack-objects` / `ox gc` powered by **Rayon**.
 - **Interactive Terminal UI Dashboard**: Built-in interactive TUI (`ox ui` or `ox log --tui`) powered by **Ratatui** and **Crossterm**.
 - **Strict Rust Quality Standards**: Rust 2021 edition, typed error propagation with `thiserror`, `anyhow` at CLI boundaries, zero unwrap/expect in production paths, zero `unsafe` (except documented `memmap2`), and 100% clean `cargo clippy --all -- -D warnings`.
@@ -328,10 +330,12 @@ ox tag -a <tagname> -m "Release v1.0.0"
 ox tag -d <tagname>
 ```
 
-#### Remotes & Networking
+#### Remotes & Networking (HTTP & SSH)
 ```bash
-# Clone a repository over Smart HTTP or local filesystem
-ox clone <url> [directory]
+# Clone a repository over Smart HTTP, Native SSH, or local filesystem
+ox clone https://github.com/user/repo.git
+ox clone git@github.com:user/repo.git
+ox clone ssh://git@github.com:22/user/repo.git
 
 # Manage remote repositories
 ox remote add <name> <url>
@@ -343,8 +347,24 @@ ox fetch [remote]
 # Pull changes and fast-forward/merge into current branch
 ox pull [remote] [branch]
 
-# Push local commits to a remote
+# Push local commits to a remote over HTTP or SSH
 ox push [remote] [branch]
+```
+
+#### Command Aliases & Shorthands
+```bash
+# Built-in standard Git aliases work right out of the box
+ox st                  # ox status
+ox co <branch>         # ox checkout <branch>
+ox ci -m "msg"         # ox commit -m "msg"
+ox br                  # ox branch
+ox df [--staged]       # ox diff [--staged]
+ox rb <upstream>       # ox rebase <upstream>
+ox cp <commit>         # ox cherry-pick <commit>
+
+# Custom aliases defined in .git/config or ~/.gitconfig [alias] section
+# e.g., [alias] lg = log --oneline --graph
+ox lg -n 10
 ```
 
 #### Maintenance & Integrity
@@ -446,17 +466,21 @@ Oxidize includes a built-in interactive dashboard built on **Ratatui**:
 |---|:---:|:---:|---|
 | **SHA-1 Object Store** | ✅ | ✅ | Canonical Git headers, loose storage, upward `.git` discovery |
 | **Index Format v2 (`DIRC`)** | ✅ | ✅ | 62-byte stat cache, 1-8 byte NUL padding, `.git/index.lock` |
+| **Index Format v4 (`DIRC`)** | ✅ | ✅ | Path prefix compression decoding (varint strip count, no padding) |
 | **Packfile v2 (`PACK`)** | ✅ | ✅ | Object headers, base-128 OFS_DELTA, REF_DELTA |
 | **Pack Index v2 (`.idx`)** | ✅ | ✅ | `\xFFtOc`, 256 fanout table, CRC32, 4-byte/8-byte offsets |
 | **Memory-Mapped Objects** | ✅ | ✅ | Zero-copy `memmap2` with loose object fallback |
 | **Myers Diff Algorithm** | ✅ | ✅ | Shortest edit script with 3-line unified diff hunks |
 | **3-Way Line Merge** | ✅ | ✅ | Automatic clean merge or standard conflict markers |
+| **Exact Rename Detection** | ✅ | ✅ | Automatic 100% match in `ox status` and unified diff headers |
 | **Reflog Tracking** | ✅ | ✅ | Atomically recorded in `.git/logs/HEAD` and `.git/logs/refs/` |
 | **Multi-Threaded Packfile** | ✅ | ✅ | **Rayon** parallelized delta sliding window & zlib compression |
 | **Multi-Threaded `add`** | ❌ (single-threaded) | ✅ | **Rayon** concurrent scanning, hashing, and writing |
 | **Smart HTTP Transport** | ✅ | ✅ | `pkt-line` framing, capability negotiation, sideband 64k |
+| **Native SSH Transport** | ✅ | ✅ | Auto-detected system `ssh` child streaming pkt-lines |
 | **Local Repo Transport** | ✅ | ✅ | Direct thin-pack exchange across local filesystems |
 | **`.gitignore` Glob Engine** | ✅ | ✅ | Wildcards, directory rules, negations `!`, recursive `**` |
+| **Command Aliases** | ✅ | ✅ | Built-ins (`st`, `co`, `ci`, etc.) and `.git/config` `[alias]` |
 | **Stash Stack** | ✅ | ✅ | Dual-parent commit DAG topology matching Git stash format |
 | **History Rewriting** | ✅ | ✅ | `rebase`, `cherry-pick`, `revert` with 3-way line replay |
 | **Git Blame** | ✅ | ✅ | Reverse topological BFS line attribution |
@@ -489,7 +513,7 @@ Performance was verified using our automated benchmark test suite (`tests/perfor
 ### Performance Architectural Highlights:
 1. **Parallelized Pack Generation (`ox gc`)**: Sliding window delta search across 10-object windows and zlib deflate compression run simultaneously across all available CPU threads using Rayon.
 2. **Parallelized Working Tree Hashing (`ox add`)**: Loose object serialization, SHA-1 calculation, and disk writes are processed concurrently across CPU cores before updating the index.
-3. **Optimized Status Engine**: Status comparison diffs index stat caches and tree hashes directly, avoiding unnecessary disk reads when file size and mtime match the index stat cache.
+3. **Optimized Status Engine**: Direct stat cache bypass (`mtime` + `size` comparison) and parallel NTFS metadata scanning with Rayon, delivering up to 61% speedup over standard recursive scans.
 
 ---
 
@@ -502,8 +526,8 @@ Performance was verified using our automated benchmark test suite (`tests/perfor
 ### Build
 ```bash
 # Clone the repository
-git clone https://github.com/oxidize/ox.git
-cd OXIDIZE
+git clone https://github.com/braces157/oxidize.git
+cd oxidize
 
 # Build release binary
 cargo build --release
@@ -513,7 +537,7 @@ cargo build --release
 ```
 
 ### Running Tests
-All 32 unit and differential integration tests run against official `git`:
+All 36 unit and differential integration tests run against official `git`:
 ```bash
 # Run all workspace tests and differential tests
 cargo test --all
