@@ -6,16 +6,16 @@ use ratatui::style::Color;
 /// Available docked panels in the interface (matching authentic LazyGit 1-5 layout).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Panel {
-    /// [1] Repository status, current branch & tracking overview.
+    /// Panel 1: Repository status, current branch & tracking overview.
     Status,
-    /// [2] Working tree files: Staged, Unstaged, Untracked.
+    /// Panel 2: Working tree files: Staged, Unstaged, Untracked.
     #[default]
     Files,
-    /// [3] Local branches, remotes, and tags.
+    /// Panel 3: Local branches, remotes, and tags.
     Branches,
-    /// [4] Commit log history and reflog.
+    /// Panel 4: Commit log history and reflog.
     Commits,
-    /// [5] Stash stack entries.
+    /// Panel 5: Stash stack entries.
     Stash,
 }
 

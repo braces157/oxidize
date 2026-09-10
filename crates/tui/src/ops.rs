@@ -48,8 +48,7 @@ pub fn unstage_path(repo_root: &Path, git_dir: &Path, rel_path: &str) -> Result<
         .map_err(|e| TuiError::Terminal(e.to_string()))?
         .1;
 
-    let store =
-        RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
+    let store = RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
 
     let head_map = head_oid_opt
         .and_then(|oid| {
@@ -199,7 +198,12 @@ pub fn create_commit(
     let first_line = message.lines().next().unwrap_or("").trim();
     let ref_msg = format!("commit: {}", first_line);
     ref_store
-        .update_ref(&branch_name, &commit_oid, head_commit_oid.as_ref(), &ref_msg)
+        .update_ref(
+            &branch_name,
+            &commit_oid,
+            head_commit_oid.as_ref(),
+            &ref_msg,
+        )
         .map_err(|e| TuiError::Terminal(e.to_string()))?;
 
     Ok(commit_oid)
@@ -215,8 +219,8 @@ pub fn checkout_tree_and_update_index(
     let index_path = git_dir.join("index");
     let mut index = Index::load_from(&index_path).map_err(|e| TuiError::Terminal(e.to_string()))?;
 
-    let target_map = flatten_tree(&store, target_tree_oid, "")
-        .map_err(|e| TuiError::Terminal(e.to_string()))?;
+    let target_map =
+        flatten_tree(&store, target_tree_oid, "").map_err(|e| TuiError::Terminal(e.to_string()))?;
 
     // 1. Remove files from working tree that are in old index but not in new target tree
     for entry in &index.entries {
@@ -267,7 +271,11 @@ pub fn checkout_branch(
 
     let commit = match store.read_object(&commit_oid) {
         Ok(Object::Commit(c)) => c,
-        _ => return Err(TuiError::Terminal("branch does not point to a commit".to_string())),
+        _ => {
+            return Err(TuiError::Terminal(
+                "branch does not point to a commit".to_string(),
+            ))
+        }
     };
 
     checkout_tree_and_update_index(repo_root, git_dir, &commit.tree)?;
@@ -323,11 +331,7 @@ pub fn delete_branch(git_dir: &Path, branch_name: &str) -> Result<(), TuiError> 
 }
 
 /// Pops the selected stash into the working tree and drops it from the stash stack.
-pub fn pop_stash(
-    repo_root: &Path,
-    git_dir: &Path,
-    stash_oid: &ObjectId,
-) -> Result<(), TuiError> {
+pub fn pop_stash(repo_root: &Path, git_dir: &Path, stash_oid: &ObjectId) -> Result<(), TuiError> {
     let store = RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
     let stash_commit = match store.read_object(stash_oid) {
         Ok(Object::Commit(c)) => c,
@@ -511,7 +515,8 @@ pub fn amend_commit(
     message: &str,
 ) -> Result<ObjectId, TuiError> {
     let store = LooseObjectStore::new(git_dir.join("objects"));
-    let repo_store = RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
+    let repo_store =
+        RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
     let ref_store = RefStore::new(git_dir);
     let index_path = git_dir.join("index");
     let index = Index::load_from(&index_path).map_err(|e| TuiError::Terminal(e.to_string()))?;
@@ -520,9 +525,8 @@ pub fn amend_commit(
         .resolve_head()
         .map_err(|e| TuiError::Terminal(e.to_string()))?;
 
-    let head_oid = head_commit_oid.ok_or_else(|| {
-        TuiError::Terminal("cannot amend: repository has no commits".to_string())
-    })?;
+    let head_oid = head_commit_oid
+        .ok_or_else(|| TuiError::Terminal("cannot amend: repository has no commits".to_string()))?;
 
     let head_commit = match repo_store.read_object(&head_oid) {
         Ok(Object::Commit(c)) => c,
@@ -555,11 +559,7 @@ pub fn amend_commit(
 }
 
 /// Applies a stash commit without dropping it from the stash stack.
-pub fn apply_stash(
-    repo_root: &Path,
-    git_dir: &Path,
-    stash_oid: &ObjectId,
-) -> Result<(), TuiError> {
+pub fn apply_stash(repo_root: &Path, git_dir: &Path, stash_oid: &ObjectId) -> Result<(), TuiError> {
     let store = RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
     let stash_commit = match store.read_object(stash_oid) {
         Ok(Object::Commit(c)) => c,
@@ -570,11 +570,7 @@ pub fn apply_stash(
 }
 
 /// Creates a new stash commit saving working directory changes and index state.
-pub fn stash_save(
-    repo_root: &Path,
-    git_dir: &Path,
-    message: &str,
-) -> Result<ObjectId, TuiError> {
+pub fn stash_save(repo_root: &Path, git_dir: &Path, message: &str) -> Result<ObjectId, TuiError> {
     let store = LooseObjectStore::new(git_dir.join("objects"));
     let ref_store = RefStore::new(git_dir);
     let index_path = git_dir.join("index");

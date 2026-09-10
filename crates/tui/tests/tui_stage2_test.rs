@@ -30,8 +30,16 @@ fn create_test_repo() -> (TempDir, std::path::PathBuf) {
     // Initial commit with two files
     fs::write(repo_dir.join("tracked1.txt"), "hello from tracked 1\n").unwrap();
     fs::write(repo_dir.join("tracked2.txt"), "hello from tracked 2\n").unwrap();
-    Command::new("git").args(["add", "."]).current_dir(&repo_dir).output().unwrap();
-    Command::new("git").args(["commit", "-m", "initial commit"]).current_dir(&repo_dir).output().unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "initial commit"])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
 
     let git_dir = repo_dir.join(".git");
     (tmp, git_dir)
@@ -49,7 +57,11 @@ fn test_stage_and_unstage_untracked_file() {
     app.load_repository(&git_dir).unwrap();
 
     // Verify it starts as Untracked
-    let file_idx = app.files.iter().position(|f| f.path == "new_file.txt").unwrap();
+    let file_idx = app
+        .files
+        .iter()
+        .position(|f| f.path == "new_file.txt")
+        .unwrap();
     app.files_selected = file_idx;
     assert_eq!(app.files[file_idx].kind, FileStatusKind::Untracked);
 
@@ -58,7 +70,11 @@ fn test_stage_and_unstage_untracked_file() {
 
     // Verify status updated to StagedNew
     assert!(app.status_message.as_ref().unwrap().contains("Staged"));
-    let staged_idx = app.files.iter().position(|f| f.path == "new_file.txt").unwrap();
+    let staged_idx = app
+        .files
+        .iter()
+        .position(|f| f.path == "new_file.txt")
+        .unwrap();
     assert_eq!(app.files[staged_idx].kind, FileStatusKind::StagedNew);
 
     // Verify written to index
@@ -71,7 +87,11 @@ fn test_stage_and_unstage_untracked_file() {
 
     // Verify status updated back to Untracked
     assert!(app.status_message.as_ref().unwrap().contains("Unstaged"));
-    let untracked_idx = app.files.iter().position(|f| f.path == "new_file.txt").unwrap();
+    let untracked_idx = app
+        .files
+        .iter()
+        .position(|f| f.path == "new_file.txt")
+        .unwrap();
     assert_eq!(app.files[untracked_idx].kind, FileStatusKind::Untracked);
 
     // Verify removed from index
@@ -90,22 +110,37 @@ fn test_stage_and_unstage_modified_file() {
     let mut app = App::new();
     app.load_repository(&git_dir).unwrap();
 
-    let file_idx = app.files.iter().position(|f| f.path == "tracked1.txt").unwrap();
+    let file_idx = app
+        .files
+        .iter()
+        .position(|f| f.path == "tracked1.txt")
+        .unwrap();
     app.files_selected = file_idx;
     assert_eq!(app.files[file_idx].kind, FileStatusKind::UnstagedModified);
 
     // 1. Stage modification
     app.toggle_stage_selected().unwrap();
 
-    let staged_idx = app.files.iter().position(|f| f.path == "tracked1.txt").unwrap();
+    let staged_idx = app
+        .files
+        .iter()
+        .position(|f| f.path == "tracked1.txt")
+        .unwrap();
     assert_eq!(app.files[staged_idx].kind, FileStatusKind::StagedModified);
 
     // 2. Unstage modification
     app.files_selected = staged_idx;
     app.toggle_stage_selected().unwrap();
 
-    let unstaged_idx = app.files.iter().position(|f| f.path == "tracked1.txt").unwrap();
-    assert_eq!(app.files[unstaged_idx].kind, FileStatusKind::UnstagedModified);
+    let unstaged_idx = app
+        .files
+        .iter()
+        .position(|f| f.path == "tracked1.txt")
+        .unwrap();
+    assert_eq!(
+        app.files[unstaged_idx].kind,
+        FileStatusKind::UnstagedModified
+    );
 }
 
 #[test]
@@ -131,7 +166,11 @@ fn test_stage_all_and_unstage_all() {
 
     // 2. Unstage All
     app.stage_all().unwrap();
-    assert!(app.status_message.as_ref().unwrap().contains("Unstaged all"));
+    assert!(app
+        .status_message
+        .as_ref()
+        .unwrap()
+        .contains("Unstaged all"));
     assert_eq!(app.files.len(), 3);
     assert!(app.files.iter().all(|f| !f.kind.is_staged()));
 }
@@ -142,7 +181,10 @@ fn test_discard_modified_file() {
     let repo_dir = tmp.path();
 
     let original_content = "hello from tracked 1\n";
-    assert_eq!(fs::read_to_string(repo_dir.join("tracked1.txt")).unwrap(), original_content);
+    assert_eq!(
+        fs::read_to_string(repo_dir.join("tracked1.txt")).unwrap(),
+        original_content
+    );
 
     // Make an unwanted edit
     fs::write(repo_dir.join("tracked1.txt"), "unwanted corrupted change\n").unwrap();
@@ -150,7 +192,11 @@ fn test_discard_modified_file() {
     let mut app = App::new();
     app.load_repository(&git_dir).unwrap();
 
-    let file_idx = app.files.iter().position(|f| f.path == "tracked1.txt").unwrap();
+    let file_idx = app
+        .files
+        .iter()
+        .position(|f| f.path == "tracked1.txt")
+        .unwrap();
     app.files_selected = file_idx;
     assert_eq!(app.files[file_idx].kind, FileStatusKind::UnstagedModified);
 
@@ -177,7 +223,11 @@ fn test_discard_untracked_file() {
     let mut app = App::new();
     app.load_repository(&git_dir).unwrap();
 
-    let file_idx = app.files.iter().position(|f| f.path == "temporary_junk.txt").unwrap();
+    let file_idx = app
+        .files
+        .iter()
+        .position(|f| f.path == "temporary_junk.txt")
+        .unwrap();
     app.files_selected = file_idx;
 
     // Discard untracked file

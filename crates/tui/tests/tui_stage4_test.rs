@@ -30,8 +30,16 @@ fn create_test_repo() -> (TempDir, std::path::PathBuf) {
         .unwrap();
 
     fs::write(repo_dir.join("root.txt"), "first line\n").unwrap();
-    Command::new("git").args(["add", "."]).current_dir(&repo_dir).output().unwrap();
-    Command::new("git").args(["commit", "-m", "root commit"]).current_dir(&repo_dir).output().unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "root commit"])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
 
     let git_dir = repo_dir.join(".git");
     (tmp, git_dir)
@@ -49,8 +57,16 @@ fn test_branch_checkout_and_working_tree_update() {
         .output()
         .unwrap();
     fs::write(repo_dir.join("feature_x.txt"), "feature X content\n").unwrap();
-    Command::new("git").args(["add", "."]).current_dir(repo_dir).output().unwrap();
-    Command::new("git").args(["commit", "-m", "add feature X"]).current_dir(repo_dir).output().unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add feature X"])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
 
     // Switch back to master
     Command::new("git")
@@ -66,7 +82,11 @@ fn test_branch_checkout_and_working_tree_update() {
     assert_eq!(app.branch_name, "master");
 
     app.select_panel(Panel::Branches);
-    let feat_idx = app.branches.iter().position(|b| b.name == "feature-x").unwrap();
+    let feat_idx = app
+        .branches
+        .iter()
+        .position(|b| b.name == "feature-x")
+        .unwrap();
     app.branches_selected = feat_idx;
 
     // Checkout selected branch
@@ -75,7 +95,11 @@ fn test_branch_checkout_and_working_tree_update() {
     // Verify branch switched
     assert_eq!(app.branch_name, "feature-x");
     assert!(repo_dir.join("feature_x.txt").exists());
-    assert!(app.status_message.as_ref().unwrap().contains("Switched to branch 'feature-x'"));
+    assert!(app
+        .status_message
+        .as_ref()
+        .unwrap()
+        .contains("Switched to branch 'feature-x'"));
 
     // Check that HEAD in branches panel is now marked correctly
     let current_branch_item = app.branches.iter().find(|b| b.name == "feature-x").unwrap();
@@ -105,7 +129,10 @@ fn test_branch_creation_via_modal() {
     // Verify new branch is active
     assert_eq!(app.active_modal, ActiveModal::None);
     assert_eq!(app.branch_name, "release/v1.0");
-    assert!(app.branches.iter().any(|b| b.name == "release/v1.0" && b.is_head));
+    assert!(app
+        .branches
+        .iter()
+        .any(|b| b.name == "release/v1.0" && b.is_head));
 }
 
 #[test]
@@ -125,18 +152,34 @@ fn test_branch_deletion() {
     app.select_panel(Panel::Branches);
 
     // 1. Trying to delete active branch should fail
-    let master_idx = app.branches.iter().position(|b| b.name == "master").unwrap();
+    let master_idx = app
+        .branches
+        .iter()
+        .position(|b| b.name == "master")
+        .unwrap();
     app.branches_selected = master_idx;
     app.delete_selected_branch().unwrap();
-    assert!(app.status_message.as_ref().unwrap().contains("Cannot delete checked-out branch"));
+    assert!(app
+        .status_message
+        .as_ref()
+        .unwrap()
+        .contains("Cannot delete checked-out branch"));
     assert!(app.branches.iter().any(|b| b.name == "master"));
 
     // 2. Deleting other branch succeeds
-    let del_idx = app.branches.iter().position(|b| b.name == "to-delete").unwrap();
+    let del_idx = app
+        .branches
+        .iter()
+        .position(|b| b.name == "to-delete")
+        .unwrap();
     app.branches_selected = del_idx;
     app.delete_selected_branch().unwrap();
 
-    assert!(app.status_message.as_ref().unwrap().contains("Deleted branch 'to-delete'"));
+    assert!(app
+        .status_message
+        .as_ref()
+        .unwrap()
+        .contains("Deleted branch 'to-delete'"));
     assert!(!app.branches.iter().any(|b| b.name == "to-delete"));
     assert!(!git_dir.join("refs/heads/to-delete").exists());
 }
@@ -164,7 +207,11 @@ fn test_stash_pop_and_drop() {
     app.pop_selected_stash().unwrap();
 
     // Verify working tree received changes back
-    assert!(app.status_message.as_ref().unwrap().contains("Popped stash"));
+    assert!(app
+        .status_message
+        .as_ref()
+        .unwrap()
+        .contains("Popped stash"));
     assert_eq!(
         fs::read_to_string(repo_dir.join("root.txt")).unwrap(),
         "modified before stash\n"
@@ -182,7 +229,11 @@ fn test_stash_pop_and_drop() {
     assert_eq!(app.stashes.len(), 1);
 
     app.drop_selected_stash().unwrap();
-    assert!(app.status_message.as_ref().unwrap().contains("Dropped stash"));
+    assert!(app
+        .status_message
+        .as_ref()
+        .unwrap()
+        .contains("Dropped stash"));
     assert_eq!(app.stashes.len(), 0);
 }
 

@@ -1,7 +1,7 @@
 use crate::model::{
-    ActiveModal, BranchItem, BranchesTab, CommitItem, CommitsTab, DiffLine, DiffLineKind,
-    DiffView, FileItem, FileStatusKind, FocusedWindow, Panel, ReflogItem, RemoteItem, StashItem,
-    TabMode, TagItem,
+    ActiveModal, BranchItem, BranchesTab, CommitItem, CommitsTab, DiffLine, DiffLineKind, DiffView,
+    FileItem, FileStatusKind, FocusedWindow, Panel, ReflogItem, RemoteItem, StashItem, TabMode,
+    TagItem,
 };
 use crate::ops;
 use crate::TuiError;
@@ -483,7 +483,8 @@ impl App {
             }
             Panel::Branches => match self.branches_tab {
                 BranchesTab::Local => {
-                    if !self.branches.is_empty() && self.branches_selected + 1 < self.branches.len() {
+                    if !self.branches.is_empty() && self.branches_selected + 1 < self.branches.len()
+                    {
                         self.branches_selected += 1;
                     }
                 }
@@ -785,8 +786,14 @@ impl App {
                     }
                 }
 
-                let ahead = head_set.iter().filter(|oid| !remote_set.contains(oid)).count();
-                let behind = remote_set.iter().filter(|oid| !head_set.contains(oid)).count();
+                let ahead = head_set
+                    .iter()
+                    .filter(|oid| !remote_set.contains(oid))
+                    .count();
+                let behind = remote_set
+                    .iter()
+                    .filter(|oid| !head_set.contains(oid))
+                    .count();
                 return (ahead, behind);
             }
         }
@@ -801,41 +808,82 @@ impl App {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Repository".to_string());
 
-        lines.push(DiffLine::new(format!("Repository:   {}", repo_name), DiffLineKind::Header));
-        lines.push(DiffLine::new(format!("Path:         {}", self.repo_root.display()), DiffLineKind::Normal));
-        lines.push(DiffLine::new(format!("Branch:       * {}", self.branch_name), DiffLineKind::Header));
         lines.push(DiffLine::new(
-            format!("Upstream:     ↑{} ahead, ↓{} behind", self.ahead_behind.0, self.ahead_behind.1),
+            format!("Repository:   {}", repo_name),
+            DiffLineKind::Header,
+        ));
+        lines.push(DiffLine::new(
+            format!("Path:         {}", self.repo_root.display()),
+            DiffLineKind::Normal,
+        ));
+        lines.push(DiffLine::new(
+            format!("Branch:       * {}", self.branch_name),
+            DiffLineKind::Header,
+        ));
+        lines.push(DiffLine::new(
+            format!(
+                "Upstream:     ↑{} ahead, ↓{} behind",
+                self.ahead_behind.0, self.ahead_behind.1
+            ),
             DiffLineKind::Normal,
         ));
 
         let staged_count = self.files.iter().filter(|f| f.kind.is_staged()).count();
-        let unstaged_count = self.files.iter().filter(|f| !f.kind.is_staged() && f.kind != FileStatusKind::Untracked).count();
-        let untracked_count = self.files.iter().filter(|f| f.kind == FileStatusKind::Untracked).count();
+        let unstaged_count = self
+            .files
+            .iter()
+            .filter(|f| !f.kind.is_staged() && f.kind != FileStatusKind::Untracked)
+            .count();
+        let untracked_count = self
+            .files
+            .iter()
+            .filter(|f| f.kind == FileStatusKind::Untracked)
+            .count();
 
         lines.push(DiffLine::new(
-            format!("Working Tree: {} staged, {} unstaged, {} untracked", staged_count, unstaged_count, untracked_count),
+            format!(
+                "Working Tree: {} staged, {} unstaged, {} untracked",
+                staged_count, unstaged_count, untracked_count
+            ),
             if staged_count + unstaged_count + untracked_count == 0 {
                 DiffLineKind::Addition
             } else {
                 DiffLineKind::Deletion
             },
         ));
-        lines.push(DiffLine::new(format!("Total Commits: {}", self.commits.len()), DiffLineKind::Normal));
-        lines.push(DiffLine::new("Engine:        Oxidize LazyOx v0.1.0 (Pure Rust Git)", DiffLineKind::Normal));
+        lines.push(DiffLine::new(
+            format!("Total Commits: {}", self.commits.len()),
+            DiffLineKind::Normal,
+        ));
+        lines.push(DiffLine::new(
+            "Engine:        Oxidize LazyOx v0.1.0 (Pure Rust Git)",
+            DiffLineKind::Normal,
+        ));
 
         lines.push(DiffLine::new("", DiffLineKind::Normal));
-        lines.push(DiffLine::new("--- Configured Remotes ---", DiffLineKind::Header));
+        lines.push(DiffLine::new(
+            "--- Configured Remotes ---",
+            DiffLineKind::Header,
+        ));
         if self.remotes.is_empty() {
-            lines.push(DiffLine::new("  (no remotes configured)", DiffLineKind::Context));
+            lines.push(DiffLine::new(
+                "  (no remotes configured)",
+                DiffLineKind::Context,
+            ));
         } else {
             for r in &self.remotes {
-                lines.push(DiffLine::new(format!("  {} -> {}", r.name, r.url), DiffLineKind::Normal));
+                lines.push(DiffLine::new(
+                    format!("  {} -> {}", r.name, r.url),
+                    DiffLineKind::Normal,
+                ));
             }
         }
 
         lines.push(DiffLine::new("", DiffLineKind::Normal));
-        lines.push(DiffLine::new("--- Recent Commits ---", DiffLineKind::Header));
+        lines.push(DiffLine::new(
+            "--- Recent Commits ---",
+            DiffLineKind::Header,
+        ));
         if self.commits.is_empty() {
             lines.push(DiffLine::new("  (no commits yet)", DiffLineKind::Context));
         } else {
@@ -855,21 +903,37 @@ impl App {
 
     fn compute_remotes_view(&self) -> DiffView {
         let mut lines = Vec::new();
-        lines.push(DiffLine::new("Configured Remote Repositories", DiffLineKind::Header));
+        lines.push(DiffLine::new(
+            "Configured Remote Repositories",
+            DiffLineKind::Header,
+        ));
         lines.push(DiffLine::new("", DiffLineKind::Normal));
 
         if self.remotes.is_empty() {
-            lines.push(DiffLine::new("No remotes configured in .git/config", DiffLineKind::Context));
-            lines.push(DiffLine::new("Add a remote with: git remote add <name> <url>", DiffLineKind::Normal));
+            lines.push(DiffLine::new(
+                "No remotes configured in .git/config",
+                DiffLineKind::Context,
+            ));
+            lines.push(DiffLine::new(
+                "Add a remote with: git remote add <name> <url>",
+                DiffLineKind::Normal,
+            ));
         } else {
             for (idx, r) in self.remotes.iter().enumerate() {
                 let is_sel = idx == self.remotes_selected;
                 let prefix = if is_sel { "> " } else { "  " };
                 lines.push(DiffLine::new(
                     format!("{}{}", prefix, r.name),
-                    if is_sel { DiffLineKind::Addition } else { DiffLineKind::Header },
+                    if is_sel {
+                        DiffLineKind::Addition
+                    } else {
+                        DiffLineKind::Header
+                    },
                 ));
-                lines.push(DiffLine::new(format!("    URL: {}", r.url), DiffLineKind::Normal));
+                lines.push(DiffLine::new(
+                    format!("    URL: {}", r.url),
+                    DiffLineKind::Normal,
+                ));
             }
         }
 
@@ -879,10 +943,7 @@ impl App {
             "Remotes Overview".to_string()
         };
 
-        DiffView {
-            title,
-            lines,
-        }
+        DiffView { title, lines }
     }
 
     fn compute_tags_view(&self, store: &RepoObjectStore) -> DiffView {
@@ -894,8 +955,14 @@ impl App {
         };
 
         if let Some(tag) = self.selected_tag() {
-            lines.push(DiffLine::new(format!("Tag:    {}", tag.name), DiffLineKind::Header));
-            lines.push(DiffLine::new(format!("Commit: {}", tag.oid), DiffLineKind::Header));
+            lines.push(DiffLine::new(
+                format!("Tag:    {}", tag.name),
+                DiffLineKind::Header,
+            ));
+            lines.push(DiffLine::new(
+                format!("Commit: {}", tag.oid),
+                DiffLineKind::Header,
+            ));
 
             if let Ok(Object::Commit(c)) = store.read_object(&tag.oid) {
                 lines.push(DiffLine::new(
@@ -904,18 +971,24 @@ impl App {
                 ));
                 lines.push(DiffLine::new("", DiffLineKind::Normal));
                 for msg_line in c.message.lines() {
-                    lines.push(DiffLine::new(format!("    {}", msg_line), DiffLineKind::Normal));
+                    lines.push(DiffLine::new(
+                        format!("    {}", msg_line),
+                        DiffLineKind::Normal,
+                    ));
                 }
             }
         } else {
-            lines.push(DiffLine::new("No tags in repository", DiffLineKind::Context));
-            lines.push(DiffLine::new("Create a tag with: git tag <tagname>", DiffLineKind::Normal));
+            lines.push(DiffLine::new(
+                "No tags in repository",
+                DiffLineKind::Context,
+            ));
+            lines.push(DiffLine::new(
+                "Create a tag with: git tag <tagname>",
+                DiffLineKind::Normal,
+            ));
         }
 
-        DiffView {
-            title,
-            lines,
-        }
+        DiffView { title, lines }
     }
 
     fn compute_reflog_view(&self, store: &RepoObjectStore) -> DiffView {
@@ -927,10 +1000,22 @@ impl App {
         };
 
         if let Some(entry) = self.selected_reflog() {
-            lines.push(DiffLine::new(format!("Reflog:  {}", entry.selector), DiffLineKind::Header));
-            lines.push(DiffLine::new(format!("Action:  {}", entry.action), DiffLineKind::Header));
-            lines.push(DiffLine::new(format!("Commit:  {}", entry.oid), DiffLineKind::Normal));
-            lines.push(DiffLine::new(format!("Message: {}", entry.message), DiffLineKind::Normal));
+            lines.push(DiffLine::new(
+                format!("Reflog:  {}", entry.selector),
+                DiffLineKind::Header,
+            ));
+            lines.push(DiffLine::new(
+                format!("Action:  {}", entry.action),
+                DiffLineKind::Header,
+            ));
+            lines.push(DiffLine::new(
+                format!("Commit:  {}", entry.oid),
+                DiffLineKind::Normal,
+            ));
+            lines.push(DiffLine::new(
+                format!("Message: {}", entry.message),
+                DiffLineKind::Normal,
+            ));
 
             if let Ok(Object::Commit(c)) = store.read_object(&entry.oid) {
                 lines.push(DiffLine::new("", DiffLineKind::Normal));
@@ -940,17 +1025,17 @@ impl App {
                 ));
                 lines.push(DiffLine::new("", DiffLineKind::Normal));
                 for msg_line in c.message.lines() {
-                    lines.push(DiffLine::new(format!("    {}", msg_line), DiffLineKind::Normal));
+                    lines.push(DiffLine::new(
+                        format!("    {}", msg_line),
+                        DiffLineKind::Normal,
+                    ));
                 }
             }
         } else {
             lines.push(DiffLine::new("Reflog is empty", DiffLineKind::Context));
         }
 
-        DiffView {
-            title,
-            lines,
-        }
+        DiffView { title, lines }
     }
 
     fn compute_file_diff(&self, store: &RepoObjectStore, file: &FileItem) -> DiffView {
@@ -1130,7 +1215,10 @@ impl App {
             DiffLineKind::Header,
         ));
         lines.push(DiffLine::new(
-            format!("Remote Ref:  {}", if branch.is_remote { "YES" } else { "NO" }),
+            format!(
+                "Remote Ref:  {}",
+                if branch.is_remote { "YES" } else { "NO" }
+            ),
             DiffLineKind::Header,
         ));
 
@@ -1144,7 +1232,10 @@ impl App {
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_else(|| commit.author.time_seconds.to_string());
                 lines.push(DiffLine::new(
-                    format!("Author:      {} <{}>", commit.author.name, commit.author.email),
+                    format!(
+                        "Author:      {} <{}>",
+                        commit.author.name, commit.author.email
+                    ),
                     DiffLineKind::Header,
                 ));
                 lines.push(DiffLine::new(
@@ -1157,7 +1248,10 @@ impl App {
                 }
             }
         } else {
-            lines.push(DiffLine::new("No commits on this branch yet", DiffLineKind::Normal));
+            lines.push(DiffLine::new(
+                "No commits on this branch yet",
+                DiffLineKind::Normal,
+            ));
         }
 
         DiffView { title, lines }
@@ -1198,7 +1292,8 @@ impl App {
                             .unwrap_or_default();
 
                         if p_blob != s_blob {
-                            if let Some(diff) = format_unified_diff(path, path, &p_blob, &s_blob, 3) {
+                            if let Some(diff) = format_unified_diff(path, path, &p_blob, &s_blob, 3)
+                            {
                                 for d_line in diff.lines() {
                                     lines.push(DiffLine::from_raw_line(d_line));
                                 }
@@ -1286,7 +1381,8 @@ impl App {
                 cursor: 0,
             };
         } else {
-            self.status_message = Some("Cannot commit: No files are staged (press Space to stage files)".to_string());
+            self.status_message =
+                Some("Cannot commit: No files are staged (press Space to stage files)".to_string());
         }
     }
 
@@ -1309,20 +1405,16 @@ impl App {
             | ActiveModal::StashSave {
                 ref mut message,
                 ref mut cursor,
-            } => {
-                if *cursor <= message.len() {
-                    message.insert(*cursor, c);
-                    *cursor += 1;
-                }
+            } if *cursor <= message.len() => {
+                message.insert(*cursor, c);
+                *cursor += 1;
             }
             ActiveModal::BranchCreate {
                 ref mut name,
                 ref mut cursor,
-            } => {
-                if *cursor <= name.len() {
-                    name.insert(*cursor, c);
-                    *cursor += 1;
-                }
+            } if *cursor <= name.len() => {
+                name.insert(*cursor, c);
+                *cursor += 1;
             }
             _ => {}
         }
@@ -1342,20 +1434,16 @@ impl App {
             | ActiveModal::StashSave {
                 ref mut message,
                 ref mut cursor,
-            } => {
-                if *cursor > 0 && *cursor <= message.len() {
-                    message.remove(*cursor - 1);
-                    *cursor -= 1;
-                }
+            } if *cursor > 0 && *cursor <= message.len() => {
+                message.remove(*cursor - 1);
+                *cursor -= 1;
             }
             ActiveModal::BranchCreate {
                 ref mut name,
                 ref mut cursor,
-            } => {
-                if *cursor > 0 && *cursor <= name.len() {
-                    name.remove(*cursor - 1);
-                    *cursor -= 1;
-                }
+            } if *cursor > 0 && *cursor <= name.len() => {
+                name.remove(*cursor - 1);
+                *cursor -= 1;
             }
             _ => {}
         }
@@ -1367,10 +1455,10 @@ impl App {
             ActiveModal::CommitPrompt { ref mut cursor, .. }
             | ActiveModal::CommitAmend { ref mut cursor, .. }
             | ActiveModal::StashSave { ref mut cursor, .. }
-            | ActiveModal::BranchCreate { ref mut cursor, .. } => {
-                if *cursor > 0 {
-                    *cursor -= 1;
-                }
+            | ActiveModal::BranchCreate { ref mut cursor, .. }
+                if *cursor > 0 =>
+            {
+                *cursor -= 1;
             }
             _ => {}
         }
@@ -1390,18 +1478,14 @@ impl App {
             | ActiveModal::StashSave {
                 ref message,
                 ref mut cursor,
-            } => {
-                if *cursor < message.len() {
-                    *cursor += 1;
-                }
+            } if *cursor < message.len() => {
+                *cursor += 1;
             }
             ActiveModal::BranchCreate {
                 ref name,
                 ref mut cursor,
-            } => {
-                if *cursor < name.len() {
-                    *cursor += 1;
-                }
+            } if *cursor < name.len() => {
+                *cursor += 1;
             }
             _ => {}
         }
@@ -1437,26 +1521,22 @@ impl App {
 
                 let commit_oid = ops::amend_commit(&self.repo_root, &self.git_dir, trimmed)?;
                 let short_sha = &commit_oid.to_string()[..7];
-                self.status_message = Some(format!(
-                    "✓ Amended commit [{}] {}",
-                    short_sha, trimmed
-                ));
+                self.status_message = Some(format!("✓ Amended commit [{}] {}", short_sha, trimmed));
                 self.active_modal = ActiveModal::None;
                 self.refresh()?;
             }
             ActiveModal::BranchCreate { name, .. } => {
                 let trimmed = name.trim();
                 if trimmed.is_empty() {
-                    self.status_message = Some("Branch creation aborted: empty branch name".to_string());
+                    self.status_message =
+                        Some("Branch creation aborted: empty branch name".to_string());
                     self.active_modal = ActiveModal::None;
                     return Ok(());
                 }
 
                 ops::create_and_checkout_branch(&self.repo_root, &self.git_dir, trimmed)?;
-                self.status_message = Some(format!(
-                    "✓ Created and switched to branch '{}'",
-                    trimmed
-                ));
+                self.status_message =
+                    Some(format!("✓ Created and switched to branch '{}'", trimmed));
                 self.active_modal = ActiveModal::None;
                 self.refresh()?;
             }
@@ -1523,7 +1603,10 @@ impl App {
                 return Ok(());
             }
             if b.is_remote {
-                self.status_message = Some(format!("Cannot directly checkout remote branch '{}'", b.name));
+                self.status_message = Some(format!(
+                    "Cannot directly checkout remote branch '{}'",
+                    b.name
+                ));
                 return Ok(());
             }
 
@@ -1549,11 +1632,13 @@ impl App {
         }
         if let Some(b) = self.selected_branch().cloned() {
             if b.is_head {
-                self.status_message = Some(format!("Cannot delete checked-out branch '{}'", b.name));
+                self.status_message =
+                    Some(format!("Cannot delete checked-out branch '{}'", b.name));
                 return Ok(());
             }
             if b.is_remote {
-                self.status_message = Some(format!("Cannot delete remote tracking branch '{}'", b.name));
+                self.status_message =
+                    Some(format!("Cannot delete remote tracking branch '{}'", b.name));
                 return Ok(());
             }
 
@@ -1605,13 +1690,19 @@ impl App {
         match output {
             Ok(out) if out.status.success() => {
                 let msg = String::from_utf8_lossy(&out.stderr);
-                let first_line = msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("Pushed to remote");
+                let first_line = msg
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("Pushed to remote");
                 self.status_message = Some(format!("✓ {}", first_line));
                 let _ = self.refresh();
             }
             Ok(out) => {
                 let err = String::from_utf8_lossy(&out.stderr);
-                let err_first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("Push failed");
+                let err_first = err
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("Push failed");
                 self.status_message = Some(format!("✗ Push failed: {}", err_first));
             }
             Err(e) => {
@@ -1636,13 +1727,19 @@ impl App {
         match output {
             Ok(out) if out.status.success() => {
                 let msg = String::from_utf8_lossy(&out.stdout);
-                let first_line = msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("Pulled from remote");
+                let first_line = msg
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("Pulled from remote");
                 self.status_message = Some(format!("✓ {}", first_line));
                 let _ = self.refresh();
             }
             Ok(out) => {
                 let err = String::from_utf8_lossy(&out.stderr);
-                let err_first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("Pull failed");
+                let err_first = err
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("Pull failed");
                 self.status_message = Some(format!("✗ Pull failed: {}", err_first));
             }
             Err(e) => {

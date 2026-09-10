@@ -30,8 +30,16 @@ fn create_test_repo() -> (TempDir, std::path::PathBuf) {
         .unwrap();
 
     fs::write(repo_dir.join("root.txt"), "first line in root\n").unwrap();
-    Command::new("git").args(["add", "."]).current_dir(&repo_dir).output().unwrap();
-    Command::new("git").args(["commit", "-m", "root commit"]).current_dir(&repo_dir).output().unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "root commit"])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
 
     let git_dir = repo_dir.join(".git");
     (tmp, git_dir)
@@ -50,7 +58,10 @@ fn test_modal_text_editing_and_cursor_navigation() {
         app.handle_modal_char(c);
     }
     match app.active_modal {
-        ActiveModal::CommitPrompt { ref message, cursor } => {
+        ActiveModal::CommitPrompt {
+            ref message,
+            cursor,
+        } => {
             assert_eq!(message, "hello");
             assert_eq!(cursor, 5);
         }
@@ -68,7 +79,10 @@ fn test_modal_text_editing_and_cursor_navigation() {
     // Insert 'p' -> "helplo"
     app.handle_modal_char('p');
     match app.active_modal {
-        ActiveModal::CommitPrompt { ref message, cursor } => {
+        ActiveModal::CommitPrompt {
+            ref message,
+            cursor,
+        } => {
             assert_eq!(message, "helplo");
             assert_eq!(cursor, 4);
         }
@@ -78,7 +92,10 @@ fn test_modal_text_editing_and_cursor_navigation() {
     // Backspace removes 'p' -> "hello"
     app.handle_modal_backspace();
     match app.active_modal {
-        ActiveModal::CommitPrompt { ref message, cursor } => {
+        ActiveModal::CommitPrompt {
+            ref message,
+            cursor,
+        } => {
             assert_eq!(message, "hello");
             assert_eq!(cursor, 3);
         }
@@ -99,7 +116,11 @@ fn test_open_commit_modal_requires_staged_changes() {
     // Working tree is clean -> open_commit_modal should reject
     app.open_commit_modal();
     assert_eq!(app.active_modal, ActiveModal::None);
-    assert!(app.status_message.as_ref().unwrap().contains("No files are staged"));
+    assert!(app
+        .status_message
+        .as_ref()
+        .unwrap()
+        .contains("No files are staged"));
 }
 
 #[test]
@@ -122,7 +143,11 @@ fn test_commit_aborted_on_empty_message() {
     app.submit_modal().unwrap();
 
     assert_eq!(app.active_modal, ActiveModal::None);
-    assert!(app.status_message.as_ref().unwrap().contains("Commit aborted"));
+    assert!(app
+        .status_message
+        .as_ref()
+        .unwrap()
+        .contains("Commit aborted"));
     // File remains staged
     assert!(app.files.iter().any(|f| f.kind.is_staged()));
 }
@@ -133,7 +158,11 @@ fn test_successful_interactive_commit_workflow() {
     let repo_dir = tmp.path();
 
     // Add a new file and modify root.txt
-    fs::write(repo_dir.join("feature.rs"), "pub fn lazy_git() -> bool { true }\n").unwrap();
+    fs::write(
+        repo_dir.join("feature.rs"),
+        "pub fn lazy_git() -> bool { true }\n",
+    )
+    .unwrap();
     fs::write(repo_dir.join("root.txt"), "updated line in root\n").unwrap();
 
     let mut app = App::new();
@@ -178,7 +207,10 @@ fn test_successful_interactive_commit_workflow() {
     app.select_panel(Panel::Commits);
     let diff = app.cached_diff.as_ref().unwrap();
     assert!(diff.title.contains(msg));
-    assert!(diff.lines.iter().any(|l| l.content.contains("pub fn lazy_git")));
+    assert!(diff
+        .lines
+        .iter()
+        .any(|l| l.content.contains("pub fn lazy_git")));
 }
 
 #[test]

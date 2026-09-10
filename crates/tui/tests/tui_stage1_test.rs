@@ -61,8 +61,11 @@ fn test_app_navigation_and_clamping() {
 #[test]
 fn test_inspector_scrolling() {
     let mut app = App::new();
-    let diff_text = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10";
-    app.cached_diff = Some(oxidize_tui::model::DiffView::from_unified_text("Test", diff_text));
+    let diff_text =
+        "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10";
+    app.cached_diff = Some(oxidize_tui::model::DiffView::from_unified_text(
+        "Test", diff_text,
+    ));
 
     assert_eq!(app.inspector_scroll, 0);
     app.scroll_inspector_down(3);
@@ -155,7 +158,8 @@ fn test_repository_loading_and_multi_panel_state() {
     // 6. Test App loading
     let git_dir = repo_dir.join(".git");
     let mut app = App::new();
-    app.load_repository(&git_dir).expect("failed to load repository");
+    app.load_repository(&git_dir)
+        .expect("failed to load repository");
 
     // Verify branch info
     assert_eq!(app.branch_name, "master");
@@ -164,7 +168,11 @@ fn test_repository_loading_and_multi_panel_state() {
     assert_eq!(app.branches.len(), 2);
     let master_branch = app.branches.iter().find(|b| b.name == "master").unwrap();
     assert!(master_branch.is_head);
-    let feat_branch = app.branches.iter().find(|b| b.name == "feature/my-branch").unwrap();
+    let feat_branch = app
+        .branches
+        .iter()
+        .find(|b| b.name == "feature/my-branch")
+        .unwrap();
     assert!(!feat_branch.is_head);
 
     // Verify commits list
@@ -174,7 +182,11 @@ fn test_repository_loading_and_multi_panel_state() {
 
     // Verify files list
     assert_eq!(app.files.len(), 3);
-    let staged_item = app.files.iter().find(|f| f.path == "staged_new.txt").unwrap();
+    let staged_item = app
+        .files
+        .iter()
+        .find(|f| f.path == "staged_new.txt")
+        .unwrap();
     assert_eq!(staged_item.kind, FileStatusKind::StagedNew);
 
     let unstaged_item = app.files.iter().find(|f| f.path == "file1.txt").unwrap();
@@ -189,7 +201,11 @@ fn test_repository_loading_and_multi_panel_state() {
     assert!(!diff.lines.is_empty());
 
     // Switch to unstaged item and verify diff updates
-    app.files_selected = app.files.iter().position(|f| f.path == "file1.txt").unwrap();
+    app.files_selected = app
+        .files
+        .iter()
+        .position(|f| f.path == "file1.txt")
+        .unwrap();
     app.update_inspector();
     let diff2 = app.cached_diff.as_ref().unwrap();
     assert!(diff2.title.contains("file1.txt"));
@@ -200,13 +216,19 @@ fn test_repository_loading_and_multi_panel_state() {
     app.select_panel(Panel::Commits);
     let commit_diff = app.cached_diff.as_ref().unwrap();
     assert!(commit_diff.title.contains("Second commit"));
-    assert!(commit_diff.lines.iter().any(|l| l.content.contains("Second commit")));
+    assert!(commit_diff
+        .lines
+        .iter()
+        .any(|l| l.content.contains("Second commit")));
 
     // Switch to Branches panel and verify branch details
     app.select_panel(Panel::Branches);
     let branch_diff = app.cached_diff.as_ref().unwrap();
     assert!(branch_diff.title.contains("master"));
-    assert!(branch_diff.lines.iter().any(|l| l.content.contains("Active HEAD: YES")));
+    assert!(branch_diff
+        .lines
+        .iter()
+        .any(|l| l.content.contains("Active HEAD: YES")));
 }
 
 #[test]
@@ -231,8 +253,16 @@ fn test_ui_rendering_headless_backend() {
         .unwrap();
 
     fs::write(repo_dir.join("readme.md"), "# Hello\n").unwrap();
-    Command::new("git").args(["add", "."]).current_dir(repo_dir).output().unwrap();
-    Command::new("git").args(["commit", "-m", "chore: init"]).current_dir(repo_dir).output().unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "chore: init"])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
 
     let mut app = App::new();
     app.load_repository(&repo_dir.join(".git")).unwrap();
@@ -290,13 +320,33 @@ fn test_stash_loading_and_inspection() {
     let tmp = TempDir::new().unwrap();
     let repo_dir = tmp.path();
 
-    Command::new("git").args(["init", "-b", "master"]).current_dir(repo_dir).output().unwrap();
-    Command::new("git").args(["config", "user.name", "Tester"]).current_dir(repo_dir).output().unwrap();
-    Command::new("git").args(["config", "user.email", "tester@test.com"]).current_dir(repo_dir).output().unwrap();
+    Command::new("git")
+        .args(["init", "-b", "master"])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "Tester"])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "tester@test.com"])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
 
     fs::write(repo_dir.join("stash_target.txt"), "committed line\n").unwrap();
-    Command::new("git").args(["add", "."]).current_dir(repo_dir).output().unwrap();
-    Command::new("git").args(["commit", "-m", "base commit"]).current_dir(repo_dir).output().unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "base commit"])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
 
     // Modify and stash
     fs::write(repo_dir.join("stash_target.txt"), "modified for stash\n").unwrap();

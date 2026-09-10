@@ -1,8 +1,6 @@
 //! Comprehensive real-time tests for Authentic LazyGit Replica (5 panels, sub-tabs, Vim focus, amend, stash save/apply).
 
-use oxidize_tui::model::{
-    ActiveModal, BranchesTab, CommitsTab, FocusedWindow, Panel,
-};
+use oxidize_tui::model::{ActiveModal, BranchesTab, CommitsTab, FocusedWindow, Panel};
 use oxidize_tui::ui;
 use oxidize_tui::App;
 use ratatui::backend::TestBackend;
@@ -32,8 +30,16 @@ fn create_test_repo() -> (TempDir, std::path::PathBuf) {
         .unwrap();
 
     fs::write(repo_dir.join("initial.txt"), "hello world\n").unwrap();
-    Command::new("git").args(["add", "."]).current_dir(&repo_dir).output().unwrap();
-    Command::new("git").args(["commit", "-m", "Initial commit"]).current_dir(&repo_dir).output().unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "Initial commit"])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
 
     let git_dir = repo_dir.join(".git");
     (tmp, git_dir)
@@ -101,7 +107,12 @@ fn test_remotes_tags_and_reflog_loading() {
 
     // Add a remote
     Command::new("git")
-        .args(["remote", "add", "origin", "https://github.com/oxidize/ox.git"])
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/oxidize/ox.git",
+        ])
         .current_dir(repo_dir)
         .output()
         .unwrap();
@@ -115,8 +126,16 @@ fn test_remotes_tags_and_reflog_loading() {
 
     // Make second commit to generate reflog entries
     fs::write(repo_dir.join("second.txt"), "second file\n").unwrap();
-    Command::new("git").args(["add", "."]).current_dir(repo_dir).output().unwrap();
-    Command::new("git").args(["commit", "-m", "Second commit"]).current_dir(repo_dir).output().unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "Second commit"])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
 
     let mut app = App::new();
     app.load_repository(&git_dir).unwrap();
@@ -124,7 +143,9 @@ fn test_remotes_tags_and_reflog_loading() {
     // 1. Verify remotes
     assert_eq!(app.remotes.len(), 1);
     assert_eq!(app.remotes[0].name, "origin");
-    assert!(app.remotes[0].url.contains("https://github.com/oxidize/ox.git"));
+    assert!(app.remotes[0]
+        .url
+        .contains("https://github.com/oxidize/ox.git"));
 
     // 2. Verify tags
     assert_eq!(app.tags.len(), 1);
@@ -132,7 +153,10 @@ fn test_remotes_tags_and_reflog_loading() {
 
     // 3. Verify reflog
     assert!(!app.reflog.is_empty());
-    assert!(app.reflog.iter().any(|r| r.action.contains("commit") || r.message.contains("Second commit")));
+    assert!(app
+        .reflog
+        .iter()
+        .any(|r| r.action.contains("commit") || r.message.contains("Second commit")));
 
     // 4. Test Inspector for Remotes tab
     app.select_panel(Panel::Branches);
@@ -140,7 +164,10 @@ fn test_remotes_tags_and_reflog_loading() {
     app.update_inspector();
     let remote_diff = app.cached_diff.as_ref().unwrap();
     assert!(remote_diff.title.contains("Remote: origin"));
-    assert!(remote_diff.lines.iter().any(|l| l.content.contains("https://github.com/oxidize/ox.git")));
+    assert!(remote_diff
+        .lines
+        .iter()
+        .any(|l| l.content.contains("https://github.com/oxidize/ox.git")));
 
     // 5. Test Inspector for Tags tab
     app.branches_tab = BranchesTab::Tags;
@@ -166,13 +193,20 @@ fn test_amend_commit_modal() {
 
     // Stage a new change
     fs::write(repo_dir.join("initial.txt"), "amended text content\n").unwrap();
-    Command::new("git").args(["add", "."]).current_dir(repo_dir).output().unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
     app.refresh().unwrap();
 
     // Open amend modal
     app.open_amend_modal();
     match app.active_modal {
-        ActiveModal::CommitAmend { ref message, cursor } => {
+        ActiveModal::CommitAmend {
+            ref message,
+            cursor,
+        } => {
             assert_eq!(message, "Initial commit");
             assert_eq!(cursor, message.len());
         }
@@ -187,7 +221,11 @@ fn test_amend_commit_modal() {
     // Submit amend
     app.submit_modal().unwrap();
     assert_eq!(app.active_modal, ActiveModal::None);
-    assert!(app.status_message.as_ref().unwrap().contains("Amended commit"));
+    assert!(app
+        .status_message
+        .as_ref()
+        .unwrap()
+        .contains("Amended commit"));
 
     // Check commits list
     assert_eq!(app.commits.len(), 1);
@@ -209,7 +247,10 @@ fn test_stash_save_and_apply() {
     // Open Stash Save modal
     app.open_stash_save_modal();
     match app.active_modal {
-        ActiveModal::StashSave { ref message, cursor } => {
+        ActiveModal::StashSave {
+            ref message,
+            cursor,
+        } => {
             assert!(message.is_empty());
             assert_eq!(cursor, 0);
         }
@@ -230,7 +271,11 @@ fn test_stash_save_and_apply() {
     // Test apply stash (stash remains in stack, unlike pop)
     app.select_panel(Panel::Stash);
     app.apply_selected_stash().unwrap();
-    assert!(app.status_message.as_ref().unwrap().contains("Applied stash@{0}"));
+    assert!(app
+        .status_message
+        .as_ref()
+        .unwrap()
+        .contains("Applied stash@{0}"));
     assert_eq!(app.stashes.len(), 1);
     assert_eq!(
         fs::read_to_string(repo_dir.join("initial.txt")).unwrap(),
@@ -247,8 +292,14 @@ fn test_status_panel_inspector() {
     app.select_panel(Panel::Status);
     let diff = app.cached_diff.as_ref().unwrap();
     assert!(diff.title.contains("Status Overview"));
-    assert!(diff.lines.iter().any(|l| l.content.contains("Branch:") && l.content.contains("master")));
-    assert!(diff.lines.iter().any(|l| l.content.contains("Repository:") || l.content.contains("Path:")));
+    assert!(diff
+        .lines
+        .iter()
+        .any(|l| l.content.contains("Branch:") && l.content.contains("master")));
+    assert!(diff
+        .lines
+        .iter()
+        .any(|l| l.content.contains("Repository:") || l.content.contains("Path:")));
 }
 
 #[test]

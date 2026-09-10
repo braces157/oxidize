@@ -1,9 +1,7 @@
 //! Ratatui UI drawing functions and multi-panel layout rendering (LazyOx - authentic LazyGit replica).
 
 use crate::app::App;
-use crate::model::{
-    ActiveModal, BranchesTab, CommitsTab, DiffLineKind, FocusedWindow, Panel,
-};
+use crate::model::{ActiveModal, BranchesTab, CommitsTab, DiffLineKind, FocusedWindow, Panel};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -77,16 +75,20 @@ fn get_panel_border(app: &App, panel: Panel, title_line: Line<'static>) -> Block
 
 fn render_status_panel(frame: &mut Frame, app: &App, area: Rect) {
     let is_focused = is_panel_active(app, Panel::Status);
-    let title_line = Line::from(vec![
-        Span::styled(
-            " 1 Status ",
-            Style::default().fg(if is_focused {
+    let title_line = Line::from(vec![Span::styled(
+        " 1 Status ",
+        Style::default()
+            .fg(if is_focused {
                 Color::Green
             } else {
                 Color::White
-            }).add_modifier(if is_focused { Modifier::BOLD } else { Modifier::empty() }),
-        ),
-    ]);
+            })
+            .add_modifier(if is_focused {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+    )]);
 
     let block = get_panel_border(app, Panel::Status, title_line);
 
@@ -110,11 +112,21 @@ fn render_status_panel(frame: &mut Frame, app: &App, area: Rect) {
     let lines = vec![
         Line::from(vec![
             Span::styled("Repo:   ", Style::default().fg(Color::DarkGray)),
-            Span::styled(repo_name, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                repo_name,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Branch: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("* {}", app.branch_name), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("* {}", app.branch_name),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
             Span::styled(
                 format!("(↑{} ↓{})", app.ahead_behind.0, app.ahead_behind.1),
@@ -151,16 +163,20 @@ fn window_range(total: usize, selected: usize, height: usize) -> (usize, usize) 
 
 fn render_files_panel(frame: &mut Frame, app: &App, area: Rect) {
     let is_focused = is_panel_active(app, Panel::Files);
-    let title_line = Line::from(vec![
-        Span::styled(
-            " 2 Files ",
-            Style::default().fg(if is_focused {
+    let title_line = Line::from(vec![Span::styled(
+        " 2 Files ",
+        Style::default()
+            .fg(if is_focused {
                 Color::Green
             } else {
                 Color::White
-            }).add_modifier(if is_focused { Modifier::BOLD } else { Modifier::empty() }),
-        ),
-    ]);
+            })
+            .add_modifier(if is_focused {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+    )]);
 
     let block = get_panel_border(app, Panel::Files, title_line);
     let avail_height = (area.height as usize).saturating_sub(2);
@@ -222,16 +238,20 @@ fn render_files_panel(frame: &mut Frame, app: &App, area: Rect) {
 fn render_branches_panel(frame: &mut Frame, app: &App, area: Rect) {
     let is_focused = is_panel_active(app, Panel::Branches);
 
-    let mut tab_spans = vec![
-        Span::styled(
-            " 3 Branches ",
-            Style::default().fg(if is_focused {
+    let mut tab_spans = vec![Span::styled(
+        " 3 Branches ",
+        Style::default()
+            .fg(if is_focused {
                 Color::Green
             } else {
                 Color::White
-            }).add_modifier(if is_focused { Modifier::BOLD } else { Modifier::empty() }),
-        ),
-    ];
+            })
+            .add_modifier(if is_focused {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+    )];
 
     let tabs = [
         (BranchesTab::Local, "Local"),
@@ -361,7 +381,12 @@ fn render_branches_panel(frame: &mut Frame, app: &App, area: Rect) {
 
                         let line = Line::from(vec![
                             Span::styled(marker, Style::default().fg(Color::Green)),
-                            Span::styled(&r.name, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                &r.name,
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                             Span::raw("  "),
                             Span::styled(&r.url, Style::default().fg(Color::DarkGray)),
                         ]);
@@ -402,9 +427,17 @@ fn render_branches_panel(frame: &mut Frame, app: &App, area: Rect) {
 
                         let line = Line::from(vec![
                             Span::styled(marker, Style::default().fg(Color::Green)),
-                            Span::styled(&t.name, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                &t.name,
+                                Style::default()
+                                    .fg(Color::Magenta)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                             Span::raw("  "),
-                            Span::styled(format!("({})", t.short_oid), Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                format!("({})", t.short_oid),
+                                Style::default().fg(Color::DarkGray),
+                            ),
                         ]);
 
                         let item = ListItem::new(line);
@@ -426,16 +459,20 @@ fn render_branches_panel(frame: &mut Frame, app: &App, area: Rect) {
 fn render_commits_panel(frame: &mut Frame, app: &App, area: Rect) {
     let is_focused = is_panel_active(app, Panel::Commits);
 
-    let mut tab_spans = vec![
-        Span::styled(
-            " 4 Commits ",
-            Style::default().fg(if is_focused {
+    let mut tab_spans = vec![Span::styled(
+        " 4 Commits ",
+        Style::default()
+            .fg(if is_focused {
                 Color::Green
             } else {
                 Color::White
-            }).add_modifier(if is_focused { Modifier::BOLD } else { Modifier::empty() }),
-        ),
-    ];
+            })
+            .add_modifier(if is_focused {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+    )];
 
     let tabs = [
         (CommitsTab::Commits, "Commits"),
@@ -494,7 +531,12 @@ fn render_commits_panel(frame: &mut Frame, app: &App, area: Rect) {
 
                         let line = Line::from(vec![
                             Span::styled(marker, Style::default().fg(Color::Green)),
-                            Span::styled(graph_node, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                graph_node,
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled(
                                 &c.short_oid,
                                 Style::default()
@@ -511,7 +553,10 @@ fn render_commits_panel(frame: &mut Frame, app: &App, area: Rect) {
                                 }),
                             ),
                             Span::raw(" "),
-                            Span::styled(format!("({})", c.author), Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                format!("({})", c.author),
+                                Style::default().fg(Color::DarkGray),
+                            ),
                         ]);
 
                         let item = ListItem::new(line);
@@ -550,10 +595,25 @@ fn render_commits_panel(frame: &mut Frame, app: &App, area: Rect) {
 
                         let line = Line::from(vec![
                             Span::styled(marker, Style::default().fg(Color::Green)),
-                            Span::styled(&entry.selector, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                &entry.selector,
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                             Span::raw(" "),
-                            Span::styled(format!("{}: ", entry.action), Style::default().fg(Color::Yellow)),
-                            Span::styled(&entry.message, Style::default().fg(if is_selected { Color::White } else { Color::Gray })),
+                            Span::styled(
+                                format!("{}: ", entry.action),
+                                Style::default().fg(Color::Yellow),
+                            ),
+                            Span::styled(
+                                &entry.message,
+                                Style::default().fg(if is_selected {
+                                    Color::White
+                                } else {
+                                    Color::Gray
+                                }),
+                            ),
                         ]);
 
                         let item = ListItem::new(line);
@@ -574,21 +634,24 @@ fn render_commits_panel(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_stash_panel(frame: &mut Frame, app: &App, area: Rect) {
     let is_focused = is_panel_active(app, Panel::Stash);
-    let title_line = Line::from(vec![
-        Span::styled(
-            " 5 Stash ",
-            Style::default().fg(if is_focused {
+    let title_line = Line::from(vec![Span::styled(
+        " 5 Stash ",
+        Style::default()
+            .fg(if is_focused {
                 Color::Green
             } else {
                 Color::White
-            }).add_modifier(if is_focused { Modifier::BOLD } else { Modifier::empty() }),
-        ),
-    ]);
+            })
+            .add_modifier(if is_focused {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+    )]);
 
     let block = get_panel_border(app, Panel::Stash, title_line);
     let avail_height = (area.height as usize).saturating_sub(2);
-    let (start_idx, end_idx) =
-        window_range(app.stashes.len(), app.stashes_selected, avail_height);
+    let (start_idx, end_idx) = window_range(app.stashes.len(), app.stashes_selected, avail_height);
 
     let items: Vec<ListItem> = if app.stashes.is_empty() {
         vec![ListItem::new(Span::styled(
@@ -657,9 +720,15 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
         .unwrap_or_else(|| "Main".to_string());
 
     let title_text = if is_inspector_focused {
-        format!(" [ {} ] ── [ FOCUSED: j/k (or Mouse) Scroll │ PgDn/PgUp Page │ Esc/h Return ] ", base_title)
+        format!(
+            " [ {} ] ── [ FOCUSED: j/k (or Mouse) Scroll │ PgDn/PgUp Page │ Esc/h Return ] ",
+            base_title
+        )
     } else {
-        format!(" [ {} ] ── [ Enter/l to Focus & Scroll │ Mouse/PgDn to Scroll ] ", base_title)
+        format!(
+            " [ {} ] ── [ Enter/l to Focus & Scroll │ Mouse/PgDn to Scroll ] ",
+            base_title
+        )
     };
 
     let block = Block::default()
@@ -669,7 +738,11 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
         .title(Span::styled(
             title_text,
             Style::default()
-                .fg(if is_inspector_focused { Color::Green } else { Color::Cyan })
+                .fg(if is_inspector_focused {
+                    Color::Green
+                } else {
+                    Color::Cyan
+                })
                 .add_modifier(Modifier::BOLD),
         ));
 
@@ -721,7 +794,10 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             100
         };
-        let indicator = format!(" [Line {}/{} - {}%] ", current_line, total_lines, scroll_pct);
+        let indicator = format!(
+            " [Line {}/{} - {}%] ",
+            current_line, total_lines, scroll_pct
+        );
         let ind_rect = Rect {
             x: area.x + area.width.saturating_sub(indicator.len() as u16 + 2),
             y: area.y + area.height.saturating_sub(1),
@@ -730,7 +806,11 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
         };
         let ind_p = Paragraph::new(Span::styled(
             indicator,
-            Style::default().fg(if is_inspector_focused { Color::Green } else { Color::Yellow }),
+            Style::default().fg(if is_inspector_focused {
+                Color::Green
+            } else {
+                Color::Yellow
+            }),
         ));
         frame.render_widget(ind_p, ind_rect);
     }
@@ -743,13 +823,18 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(ref msg) = app.status_message {
         footer_spans.push(Span::styled(
             format!(" {} ", msg),
-            Style::default().fg(Color::Yellow).bg(Color::Rgb(40, 30, 20)).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(Color::Rgb(40, 30, 20))
+                .add_modifier(Modifier::BOLD),
         ));
         footer_spans.push(Span::raw(" │ "));
     } else {
         footer_spans.push(Span::styled(
             " [LazyOx] Ready ",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ));
         footer_spans.push(Span::raw(" │ "));
     }
@@ -757,19 +842,34 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     // Contextual action hints based on active panel or focused window
     let panel_hints = if app.focused_window == FocusedWindow::Inspector {
         vec![
-            Span::styled("j/k", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "j/k",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" (↑/↓) Scroll │ "),
             Span::styled("PgDn/PgUp", Style::default().fg(Color::Cyan)),
             Span::raw(" Page │ "),
             Span::styled("g/G", Style::default().fg(Color::Yellow)),
             Span::raw(" Top/Bottom │ "),
-            Span::styled("Esc/h", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc/h",
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Return to Sidebar │ "),
         ]
     } else {
         match app.active_panel {
             Panel::Status => vec![
-                Span::styled("1-5", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "1-5",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" Jump │ "),
                 Span::styled("Tab", Style::default().fg(Color::Cyan)),
                 Span::raw(" Cycle │ "),
@@ -779,9 +879,19 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                 Span::raw(" Refresh │ "),
             ],
             Panel::Files => vec![
-                Span::styled("Space", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Space",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" Stage │ "),
-                Span::styled("Enter/l", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Enter/l",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" Scroll Diff │ "),
                 Span::styled("a", Style::default().fg(Color::Green)),
                 Span::raw(" All │ "),
@@ -795,7 +905,12 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                 Span::raw(" Scroll │ "),
             ],
             Panel::Branches => vec![
-                Span::styled("Space/Enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Space/Enter",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" Checkout │ "),
                 Span::styled("l", Style::default().fg(Color::Cyan)),
                 Span::raw(" Diff │ "),
@@ -807,7 +922,12 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                 Span::raw(" Tabs │ "),
             ],
             Panel::Commits => vec![
-                Span::styled("Enter/l", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Enter/l",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" Scroll Diff │ "),
                 Span::styled("[/]", Style::default().fg(Color::Cyan)),
                 Span::raw(" Commits/Reflog │ "),
@@ -815,7 +935,12 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                 Span::raw(" Scroll │ "),
             ],
             Panel::Stash => vec![
-                Span::styled("Space/Enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Space/Enter",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" Pop │ "),
                 Span::styled("l", Style::default().fg(Color::Cyan)),
                 Span::raw(" Diff │ "),
@@ -828,7 +953,12 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     footer_spans.extend(panel_hints);
-    footer_spans.push(Span::styled("P", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+    footer_spans.push(Span::styled(
+        "P",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ));
     footer_spans.push(Span::raw(" Push │ "));
     footer_spans.push(Span::styled("p", Style::default().fg(Color::Cyan)));
     footer_spans.push(Span::raw(" Pull │ "));
@@ -837,14 +967,18 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     footer_spans.push(Span::styled("q", Style::default().fg(Color::LightRed)));
     footer_spans.push(Span::raw(" Quit"));
 
-    let paragraph = Paragraph::new(Line::from(footer_spans)).style(Style::default().bg(Color::Rgb(15, 18, 22)));
+    let paragraph =
+        Paragraph::new(Line::from(footer_spans)).style(Style::default().bg(Color::Rgb(15, 18, 22)));
     frame.render_widget(paragraph, area);
 }
 
 fn render_modals(frame: &mut Frame, app: &App) {
     match app.active_modal {
         ActiveModal::None => {}
-        ActiveModal::CommitPrompt { ref message, cursor } => {
+        ActiveModal::CommitPrompt {
+            ref message,
+            cursor,
+        } => {
             let area = centered_rect(65, 30, frame.area());
             frame.render_widget(Clear, area);
 
@@ -854,7 +988,9 @@ fn render_modals(frame: &mut Frame, app: &App) {
                 .border_style(Style::default().fg(Color::Green))
                 .title(Span::styled(
                     " 💬 Commit Staged Changes (Enter: Submit, Esc: Cancel) ",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ));
 
             let inner = block.inner(area);
@@ -871,22 +1007,37 @@ fn render_modals(frame: &mut Frame, app: &App) {
 
             let v_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                ])
                 .split(inner);
 
             frame.render_widget(
-                Paragraph::new(Span::styled("Commit message:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                Paragraph::new(Span::styled(
+                    "Commit message:",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
                 v_chunks[0],
             );
             frame.render_widget(Paragraph::new(display_text), v_chunks[1]);
             frame.render_widget(
-                Paragraph::new(Span::styled("Press Enter to commit, Esc to dismiss", Style::default().fg(Color::DarkGray))),
+                Paragraph::new(Span::styled(
+                    "Press Enter to commit, Esc to dismiss",
+                    Style::default().fg(Color::DarkGray),
+                )),
                 v_chunks[2],
             );
 
             frame.set_cursor_position((v_chunks[1].x + cursor as u16, v_chunks[1].y));
         }
-        ActiveModal::CommitAmend { ref message, cursor } => {
+        ActiveModal::CommitAmend {
+            ref message,
+            cursor,
+        } => {
             let area = centered_rect(65, 30, frame.area());
             frame.render_widget(Clear, area);
 
@@ -896,30 +1047,47 @@ fn render_modals(frame: &mut Frame, app: &App) {
                 .border_style(Style::default().fg(Color::Yellow))
                 .title(Span::styled(
                     " ✏️ Amend Last Commit Message (Enter: Submit, Esc: Cancel) ",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ));
 
             let inner = block.inner(area);
             frame.render_widget(block, area);
 
             let display_text = if message.is_empty() {
-                Span::styled("Enter amended message...", Style::default().fg(Color::DarkGray))
+                Span::styled(
+                    "Enter amended message...",
+                    Style::default().fg(Color::DarkGray),
+                )
             } else {
                 Span::styled(message, Style::default().fg(Color::White))
             };
 
             let v_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                ])
                 .split(inner);
 
             frame.render_widget(
-                Paragraph::new(Span::styled("Amended message:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                Paragraph::new(Span::styled(
+                    "Amended message:",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
                 v_chunks[0],
             );
             frame.render_widget(Paragraph::new(display_text), v_chunks[1]);
             frame.render_widget(
-                Paragraph::new(Span::styled("Press Enter to amend commit, Esc to dismiss", Style::default().fg(Color::DarkGray))),
+                Paragraph::new(Span::styled(
+                    "Press Enter to amend commit, Esc to dismiss",
+                    Style::default().fg(Color::DarkGray),
+                )),
                 v_chunks[2],
             );
 
@@ -935,14 +1103,19 @@ fn render_modals(frame: &mut Frame, app: &App) {
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(Span::styled(
                     " 🌱 Create & Checkout New Branch (Enter: Create, Esc: Cancel) ",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ));
 
             let inner = block.inner(area);
             frame.render_widget(block, area);
 
             let display_text = if name.is_empty() {
-                Span::styled("Enter new branch name...", Style::default().fg(Color::DarkGray))
+                Span::styled(
+                    "Enter new branch name...",
+                    Style::default().fg(Color::DarkGray),
+                )
             } else {
                 Span::styled(name, Style::default().fg(Color::White))
             };
@@ -953,14 +1126,20 @@ fn render_modals(frame: &mut Frame, app: &App) {
                 .split(inner);
 
             frame.render_widget(
-                Paragraph::new(Span::styled("New Branch Name:", Style::default().fg(Color::Green))),
+                Paragraph::new(Span::styled(
+                    "New Branch Name:",
+                    Style::default().fg(Color::Green),
+                )),
                 v_chunks[0],
             );
             frame.render_widget(Paragraph::new(display_text), v_chunks[1]);
 
             frame.set_cursor_position((v_chunks[1].x + cursor as u16, v_chunks[1].y));
         }
-        ActiveModal::StashSave { ref message, cursor } => {
+        ActiveModal::StashSave {
+            ref message,
+            cursor,
+        } => {
             let area = centered_rect(60, 25, frame.area());
             frame.render_widget(Clear, area);
 
@@ -970,14 +1149,19 @@ fn render_modals(frame: &mut Frame, app: &App) {
                 .border_style(Style::default().fg(Color::LightYellow))
                 .title(Span::styled(
                     " 💾 Stash Working Directory Changes (Enter: Save, Esc: Cancel) ",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ));
 
             let inner = block.inner(area);
             frame.render_widget(block, area);
 
             let display_text = if message.is_empty() {
-                Span::styled("(optional) stash message...", Style::default().fg(Color::DarkGray))
+                Span::styled(
+                    "(optional) stash message...",
+                    Style::default().fg(Color::DarkGray),
+                )
             } else {
                 Span::styled(message, Style::default().fg(Color::White))
             };
@@ -988,7 +1172,10 @@ fn render_modals(frame: &mut Frame, app: &App) {
                 .split(inner);
 
             frame.render_widget(
-                Paragraph::new(Span::styled("Stash Message:", Style::default().fg(Color::Yellow))),
+                Paragraph::new(Span::styled(
+                    "Stash Message:",
+                    Style::default().fg(Color::Yellow),
+                )),
                 v_chunks[0],
             );
             frame.render_widget(Paragraph::new(display_text), v_chunks[1]);
@@ -1004,44 +1191,79 @@ fn render_modals(frame: &mut Frame, app: &App) {
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::Green))
                 .title(Span::styled(
-                    format!(" 📖 Keyboard Shortcuts Cheatsheet - {} (Esc: Close) ", app.active_panel.title()),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    format!(
+                        " 📖 Keyboard Shortcuts Cheatsheet - {} (Esc: Close) ",
+                        app.active_panel.title()
+                    ),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ));
 
-            let mut lines = vec![
-                Line::from(Span::styled(
-                    format!("Shortcuts for Active Panel ({}):", app.active_panel.title()),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                )),
-            ];
+            let mut lines = vec![Line::from(Span::styled(
+                format!("Shortcuts for Active Panel ({}):", app.active_panel.title()),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ))];
 
             match app.active_panel {
                 Panel::Status => {
-                    lines.push(Line::from("  r               Refresh repository status in place"));
-                    lines.push(Line::from("  h / l           Toggle focus between sidebar and inspector"));
+                    lines.push(Line::from(
+                        "  r               Refresh repository status in place",
+                    ));
+                    lines.push(Line::from(
+                        "  h / l           Toggle focus between sidebar and inspector",
+                    ));
                 }
                 Panel::Files => {
-                    lines.push(Line::from("  Space           Toggle stage / unstage for selected file"));
-                    lines.push(Line::from("  a               Stage all changes / Unstage all if already staged"));
-                    lines.push(Line::from("  c               Open commit dialog for staged changes"));
-                    lines.push(Line::from("  A               Amend last commit with staged changes"));
+                    lines.push(Line::from(
+                        "  Space           Toggle stage / unstage for selected file",
+                    ));
+                    lines.push(Line::from(
+                        "  a               Stage all changes / Unstage all if already staged",
+                    ));
+                    lines.push(Line::from(
+                        "  c               Open commit dialog for staged changes",
+                    ));
+                    lines.push(Line::from(
+                        "  A               Amend last commit with staged changes",
+                    ));
                     lines.push(Line::from("  s               Stash working tree changes"));
-                    lines.push(Line::from("  d               Discard unstaged modifications or delete untracked file"));
+                    lines.push(Line::from(
+                        "  d               Discard unstaged modifications or delete untracked file",
+                    ));
                 }
                 Panel::Branches => {
-                    lines.push(Line::from("  Space / Enter   Switch / checkout selected branch"));
-                    lines.push(Line::from("  n               Create and checkout new branch"));
-                    lines.push(Line::from("  d               Delete selected branch (with safeguard)"));
-                    lines.push(Line::from("  [ / ]           Switch sub-tabs (Local Branches ↔ Remotes ↔ Tags)"));
+                    lines.push(Line::from(
+                        "  Space / Enter   Switch / checkout selected branch",
+                    ));
+                    lines.push(Line::from(
+                        "  n               Create and checkout new branch",
+                    ));
+                    lines.push(Line::from(
+                        "  d               Delete selected branch (with safeguard)",
+                    ));
+                    lines.push(Line::from(
+                        "  [ / ]           Switch sub-tabs (Local Branches ↔ Remotes ↔ Tags)",
+                    ));
                 }
                 Panel::Commits => {
-                    lines.push(Line::from("  Enter           Inspect commit details and parent diff"));
-                    lines.push(Line::from("  [ / ]           Switch sub-tabs (Commits ↔ Reflog)"));
+                    lines.push(Line::from(
+                        "  Enter           Inspect commit details and parent diff",
+                    ));
+                    lines.push(Line::from(
+                        "  [ / ]           Switch sub-tabs (Commits ↔ Reflog)",
+                    ));
                     lines.push(Line::from("  PgUp / PgDn     Scroll commit diff"));
                 }
                 Panel::Stash => {
-                    lines.push(Line::from("  Space / Enter   Pop selected stash into working directory"));
-                    lines.push(Line::from("  a               Apply selected stash without dropping"));
+                    lines.push(Line::from(
+                        "  Space / Enter   Pop selected stash into working directory",
+                    ));
+                    lines.push(Line::from(
+                        "  a               Apply selected stash without dropping",
+                    ));
                     lines.push(Line::from("  d               Drop selected stash entry"));
                 }
             }
@@ -1049,20 +1271,42 @@ fn render_modals(frame: &mut Frame, app: &App) {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Global Navigation & Shortcuts:",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from("  1, 2, 3, 4, 5   Jump directly to panel (Status, Files, Branches, Commits, Stash)"));
-            lines.push(Line::from("  Tab / Shift+Tab Cycle forward / backward between panels"));
-            lines.push(Line::from("  j / k (↓ / ↑)   Navigate items in focused panel (or scroll inspector)"));
-            lines.push(Line::from("  h / l (← / →)   Switch focus between Sidebar and Main Inspector"));
-            lines.push(Line::from("  [ / ]           Switch sub-tabs within active panel"));
-            lines.push(Line::from("  PgUp / PgDn     Scroll Inspector diff pane up / down"));
-            lines.push(Line::from("  Ctrl+u / Ctrl+d Fast half-page scroll in Inspector"));
-            lines.push(Line::from("  r               Refresh repository state from disk"));
-            lines.push(Line::from("  P               Push commits to remote (git/ox push)"));
-            lines.push(Line::from("  p               Pull latest changes from remote (git/ox pull)"));
+            lines.push(Line::from(
+                "  Tab / Shift+Tab Cycle forward / backward between panels",
+            ));
+            lines.push(Line::from(
+                "  j / k (↓ / ↑)   Navigate items in focused panel (or scroll inspector)",
+            ));
+            lines.push(Line::from(
+                "  h / l (← / →)   Switch focus between Sidebar and Main Inspector",
+            ));
+            lines.push(Line::from(
+                "  [ / ]           Switch sub-tabs within active panel",
+            ));
+            lines.push(Line::from(
+                "  PgUp / PgDn     Scroll Inspector diff pane up / down",
+            ));
+            lines.push(Line::from(
+                "  Ctrl+u / Ctrl+d Fast half-page scroll in Inspector",
+            ));
+            lines.push(Line::from(
+                "  r               Refresh repository state from disk",
+            ));
+            lines.push(Line::from(
+                "  P               Push commits to remote (git/ox push)",
+            ));
+            lines.push(Line::from(
+                "  p               Pull latest changes from remote (git/ox pull)",
+            ));
             lines.push(Line::from("  ?               Toggle this help cheatsheet"));
-            lines.push(Line::from("  q / Esc         Exit LazyOx / close active popup"));
+            lines.push(Line::from(
+                "  q / Esc         Exit LazyOx / close active popup",
+            ));
 
             let p = Paragraph::new(lines).block(block);
             frame.render_widget(p, area);

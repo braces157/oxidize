@@ -222,10 +222,16 @@ fn run_loop<B: ratatui::backend::Backend>(
                         }
 
                         // Direct inspector scrolling with Ctrl/Alt modifier from sidebar
-                        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) => {
+                        KeyCode::Down
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                || key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
                             app.scroll_inspector_down(3);
                         }
-                        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) => {
+                        KeyCode::Up
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                || key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
                             app.scroll_inspector_up(3);
                         }
 
@@ -299,44 +305,40 @@ fn run_loop<B: ratatui::backend::Backend>(
                         },
 
                         // Commit staged changes
-                        KeyCode::Char('c') => {
-                            if app.active_panel == Panel::Files {
-                                app.open_commit_modal();
-                            }
+                        KeyCode::Char('c') if app.active_panel == Panel::Files => {
+                            app.open_commit_modal();
                         }
 
                         // Amend commit
-                        KeyCode::Char('A') => {
-                            if app.active_panel == Panel::Files || app.active_panel == Panel::Commits {
-                                app.open_amend_modal();
-                            }
+                        KeyCode::Char('A')
+                            if app.active_panel == Panel::Files
+                                || app.active_panel == Panel::Commits =>
+                        {
+                            app.open_amend_modal();
                         }
 
                         // Stash save modal
-                        KeyCode::Char('s') => {
-                            if app.active_panel == Panel::Files || app.active_panel == Panel::Stash {
-                                app.open_stash_save_modal();
-                            }
+                        KeyCode::Char('s')
+                            if app.active_panel == Panel::Files
+                                || app.active_panel == Panel::Stash =>
+                        {
+                            app.open_stash_save_modal();
                         }
 
                         // Stage / Unstage all (in Files) OR Stash apply (in Stash)
-                        KeyCode::Char('a') => {
-                            match app.active_panel {
-                                Panel::Files => {
-                                    let _ = app.stage_all();
-                                }
-                                Panel::Stash => {
-                                    let _ = app.apply_selected_stash();
-                                }
-                                _ => {}
+                        KeyCode::Char('a') => match app.active_panel {
+                            Panel::Files => {
+                                let _ = app.stage_all();
                             }
-                        }
+                            Panel::Stash => {
+                                let _ = app.apply_selected_stash();
+                            }
+                            _ => {}
+                        },
 
                         // Create new branch
-                        KeyCode::Char('n') => {
-                            if app.active_panel == Panel::Branches {
-                                app.open_create_branch_modal();
-                            }
+                        KeyCode::Char('n') if app.active_panel == Panel::Branches => {
+                            app.open_create_branch_modal();
                         }
 
                         // Discard / Delete / Drop
@@ -378,26 +380,24 @@ fn run_loop<B: ratatui::backend::Backend>(
                         _ => {}
                     }
                 }
-                Event::Mouse(mouse) => {
-                    match mouse.kind {
-                        MouseEventKind::ScrollDown => {
-                            app.scroll_inspector_down(3);
-                        }
-                        MouseEventKind::ScrollUp => {
-                            app.scroll_inspector_up(3);
-                        }
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            let size = terminal.size().unwrap_or_default();
-                            let sidebar_width = size.width.saturating_mul(40) / 100;
-                            if mouse.column >= sidebar_width {
-                                app.focus_inspector();
-                            } else {
-                                app.focus_sidebar();
-                            }
-                        }
-                        _ => {}
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollDown => {
+                        app.scroll_inspector_down(3);
                     }
-                }
+                    MouseEventKind::ScrollUp => {
+                        app.scroll_inspector_up(3);
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let size = terminal.size().unwrap_or_default();
+                        let sidebar_width = size.width.saturating_mul(40) / 100;
+                        if mouse.column >= sidebar_width {
+                            app.focus_inspector();
+                        } else {
+                            app.focus_sidebar();
+                        }
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
