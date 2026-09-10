@@ -8,7 +8,7 @@ use crate::protocol::{
 use crate::TransportError;
 use oxidize_core::id::ObjectId;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 /// Parsed SSH connection endpoint details.
@@ -148,13 +148,13 @@ pub fn find_ssh_binary() -> Result<PathBuf, TransportError> {
     // Windows fallback paths
     #[cfg(windows)]
     {
-        let git_ssh = Path::new(r"C:\Program Files\Git\usr\bin\ssh.exe");
+        let git_ssh = PathBuf::from(r"C:\Program Files\Git\usr\bin\ssh.exe");
         if git_ssh.exists() {
-            return Ok(git_ssh.to_path_buf());
+            return Ok(git_ssh);
         }
-        let win_ssh = Path::new(r"C:\Windows\System32\OpenSSH\ssh.exe");
+        let win_ssh = PathBuf::from(r"C:\Windows\System32\OpenSSH\ssh.exe");
         if win_ssh.exists() {
-            return Ok(win_ssh.to_path_buf());
+            return Ok(win_ssh);
         }
     }
 
