@@ -1,0 +1,105 @@
+name: Documentation
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  build-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Rustdoc for all workspace crates
+        run: cargo doc --workspace --no-deps
+
+      - name: Create landing page and disable Jekyll
+        run: |
+          touch target/doc/.nojekyll
+          cat << 'EOF' > target/doc/index.html
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta http-equiv="refresh" content="0; url=ox/index.html">
+            <title>Oxidize Documentation</title>
+            <style>
+              body {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                background-color: #0d1117;
+                color: #c9d1d9;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                min-height: 100vh;
+                margin: 0;
+              }
+              h1 { color: #58a6ff; }
+              a { color: #58a6ff; text-decoration: none; }
+              a:hover { text-decoration: underline; }
+              .card {
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 24px;
+                max-width: 600px;
+                width: 90%;
+              }
+              ul { list-style: none; padding: 0; }
+              li { margin: 8px 0; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <h1>🦀 Oxidize API Documentation</h1>
+              <p>Redirecting to <a href="ox/index.html">ox crate documentation</a>...</p>
+              <h3>Workspace Crates:</h3>
+              <ul>
+                <li>📦 <a href="ox/index.html">ox</a> — CLI entrypoint and porcelain orchestration</li>
+                <li>📦 <a href="oxidize_core/index.html">oxidize-core</a> — Object models, SHA-1 addressing, loose store</li>
+                <li>📦 <a href="oxidize_index/index.html">oxidize-index</a> — DIRC v2/v4 parser, stat cache, status engine</li>
+                <li>📦 <a href="oxidize_pack/index.html">oxidize-pack</a> — Memory-mapped packfile reader, delta resolver</li>
+                <li>📦 <a href="oxidize_refs/index.html">oxidize-refs</a> — Atomic references, packed-refs, reflog</li>
+                <li>📦 <a href="oxidize_diff/index.html">oxidize-diff</a> — Myers diff algorithm, unified hunk generator</li>
+                <li>📦 <a href="oxidize_transport/index.html">oxidize-transport</a> — Smart HTTP and native SSH protocols</li>
+                <li>📦 <a href="oxidize_config/index.html">oxidize-config</a> — INI .git/config parser and serializer</li>
+                <li>📦 <a href="oxidize_tui/index.html">oxidize-tui</a> — Terminal interactive user interface</li>
+              </ul>
+            </div>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

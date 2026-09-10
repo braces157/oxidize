@@ -17,13 +17,13 @@
 
 [![CI Status](https://github.com/braces157/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/braces157/oxidize/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-v0.1.0-orange.svg?logo=rust)](https://github.com/braces157/oxidize/releases)
-[![Docs](https://img.shields.io/badge/docs-reference-blue.svg?logo=read-the-docs)](https://github.com/braces157/oxidize#readme)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg?logo=github)](https://braces157.github.io/oxidize/)
 [![Rust Version](https://img.shields.io/badge/rustc-1.80+-blue.svg?logo=rust)](https://www.rust-lang.org)
 [![Git Parity](https://img.shields.io/badge/git%20parity-100%25%20byte--compatible-blueviolet.svg?logo=git)](https://git-scm.com)
 [![Differential Tests](https://img.shields.io/badge/tests-36%2F36%20passed-brightgreen.svg)](#-differential-testing--correctness)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#-license)
 
-[**Features**](#-key-features) • [**Terminal Showcase**](#-terminal-showcase) • [**Quick Start**](#-quick-start-in-60-seconds) • [**Installation**](#-installation) • [**TUI Dashboard**](#-interactive-terminal-ui-tui) • [**CLI Reference**](#-cli-command-reference) • [**Configuration**](#-configuration-system) • [**Environment**](#-environment-variables) • [**Architecture**](#-architecture--workspace-structure) • [**Specifications**](#-git-binary-formats-specification-cheat-sheet) • [**FAQ**](#-troubleshooting--faq)
+[**Features**](#-key-features) • [**Terminal Showcase**](#-terminal-showcase) • [**Quick Start**](#-quick-start-in-60-seconds) • [**Installation**](#-installation) • [**TUI Dashboard**](#-interactive-terminal-ui-tui) • [**CLI Manual**](docs/CLI_REFERENCE.md) • [**Architecture**](docs/ARCHITECTURE.md) • [**Binary Formats**](docs/FORMATS.md) • [**API Reference**](https://braces157.github.io/oxidize/)
 
 </div>
 
@@ -707,6 +707,16 @@ Our continuous integration matrix validates test suites across **Ubuntu Linux**,
 - [x] **Phase 10**: Built-in command aliases, `.gitconfig` alias expansion, 100% rename detection, native SSH, Index v4.
 - [x] **Release Phase**: Automated shell completion generation (`ox completions <shell>`), GitHub Actions CI, complete documentation.
 - [ ] **Phase 11 (Upcoming)**: SHA-256 object format experimentation and sparse index support.
+
+---
+
+## 📚 Documentation Suite
+
+For comprehensive references, consult our specialized guides:
+- 🏗️ [**Architecture Deep Dive**](docs/ARCHITECTURE.md) — 9-crate workspace design, memory-mapping, and concurrency model.
+- 📖 [**CLI Reference Manual**](docs/CLI_REFERENCE.md) — Complete user manual for all porcelain and plumbing commands.
+- 🔬 [**Git Binary Formats Specification**](docs/FORMATS.md) — Exact byte-level layouts for loose objects, Packfile v2, and DIRC.
+- 🌐 [**Interactive Rustdoc API Reference**](https://braces157.github.io/oxidize/) — Full public API documentation hosted on GitHub Pages.
 
 ---
 
