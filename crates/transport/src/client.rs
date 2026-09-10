@@ -16,7 +16,7 @@ pub struct SmartHttpClient {
 impl Default for SmartHttpClient {
     fn default() -> Self {
         Self {
-            user_agent: "git/2.0 (oxidize/0.1.0)".to_string(),
+            user_agent: format!("git/2.0 (oxidize/{})", env!("CARGO_PKG_VERSION")),
         }
     }
 }

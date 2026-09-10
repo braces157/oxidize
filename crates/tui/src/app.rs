@@ -939,7 +939,10 @@ impl App {
             DiffLineKind::Normal,
         ));
         lines.push(DiffLine::new(
-            "Engine:        Oxidize LazyOx v0.1.0 (Pure Rust Git)",
+            format!(
+                "Engine:        Oxidize LazyOx v{} (Pure Rust Git)",
+                env!("CARGO_PKG_VERSION")
+            ),
             DiffLineKind::Normal,
         ));
 

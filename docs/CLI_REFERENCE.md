@@ -15,7 +15,7 @@ Usage: ox [OPTIONS] <COMMAND>
 | `-C <path>` | Run as if `ox` was started in `<path>` instead of current directory |
 | `--git-dir <path>` | Set path to the repository directory (`.git`) |
 | `--work-tree <path>` | Set path to working tree root |
-| `-v, --version` | Print version information (`ox 0.1.0`) |
+| `-v, --version` | Print version information (`ox 0.2.0`) |
 | `-h, --help` | Print help or subcommand help |
 
 ---

@@ -26,7 +26,7 @@ fn test_ox_version() {
     assert!(output.status.success());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("ox 0.1.0"));
+    assert!(stdout.contains(&format!("ox {}", env!("CARGO_PKG_VERSION"))));
 }
 
 #[test]

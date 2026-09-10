@@ -102,7 +102,7 @@ pub fn negotiate_upload_pack_capabilities(server_caps: &[String]) -> Vec<String>
         chosen.push("ofs-delta".to_string());
     }
 
-    chosen.push("agent=ox/0.1.0".to_string());
+    chosen.push(format!("agent=ox/{}", env!("CARGO_PKG_VERSION")));
     chosen
 }
 
@@ -120,7 +120,7 @@ pub fn negotiate_receive_pack_capabilities(server_caps: &[String]) -> Vec<String
     if server_caps.iter().any(|c| c == "ofs-delta") {
         chosen.push("ofs-delta".to_string());
     }
-    chosen.push("agent=ox/0.1.0".to_string());
+    chosen.push(format!("agent=ox/{}", env!("CARGO_PKG_VERSION")));
     chosen
 }
 

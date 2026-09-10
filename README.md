@@ -16,7 +16,7 @@
 ---
 
 [![CI Status](https://github.com/braces157/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/braces157/oxidize/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.1.0-orange.svg?logo=rust)](https://github.com/braces157/oxidize/releases)
+[![Version](https://img.shields.io/badge/version-v0.2.0-orange.svg?logo=rust)](https://github.com/braces157/oxidize/releases)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg?logo=github)](https://braces157.github.io/oxidize/)
 [![Rust Version](https://img.shields.io/badge/rustc-1.88+-blue.svg?logo=rust)](https://www.rust-lang.org)
 [![Git Compatibility](https://img.shields.io/badge/git%20compatibility-differential%20verified-blueviolet.svg?logo=git)](https://git-scm.com)
