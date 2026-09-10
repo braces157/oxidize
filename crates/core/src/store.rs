@@ -3,7 +3,6 @@
 use crate::error::CoreError;
 use crate::id::ObjectId;
 use crate::object::{Blob, Commit, FileMode, Object, ObjectType, Signature, Tag, Tree, TreeEntry};
-use crate::path::strip_verbatim_prefix;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
@@ -216,6 +215,20 @@ pub struct RepoContext {
     pub is_bare: bool,
 }
 
+fn normalize_path_components(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            c => normalized.push(c),
+        }
+    }
+    normalized
+}
+
 impl RepoContext {
     /// Discovers repository context starting from `start` and walking ancestor directories.
     pub fn discover(start: &Path) -> Result<Self, CoreError> {
@@ -225,16 +238,7 @@ impl RepoContext {
             start.to_path_buf()
         };
 
-        let mut current = PathBuf::new();
-        for comp in full.components() {
-            match comp {
-                std::path::Component::CurDir => {}
-                std::path::Component::ParentDir => {
-                    current.pop();
-                }
-                c => current.push(c),
-            }
-        }
+        let mut current = normalize_path_components(&full);
 
         loop {
             let candidate = current.join(".git");
@@ -243,8 +247,7 @@ impl RepoContext {
                 let commondir_file = candidate.join("commondir");
                 let common_dir = if commondir_file.is_file() {
                     let rel = std::fs::read_to_string(&commondir_file)?.trim().to_string();
-                    let joined = candidate.join(rel);
-                    strip_verbatim_prefix(&joined.canonicalize().unwrap_or(joined))
+                    normalize_path_components(&candidate.join(rel))
                 } else {
                     candidate.clone()
                 };
@@ -268,15 +271,12 @@ impl RepoContext {
                     } else {
                         PathBuf::from(gitdir_path_str)
                     };
-                    let target_gitdir = strip_verbatim_prefix(
-                        &target_gitdir.canonicalize().unwrap_or(target_gitdir),
-                    );
+                    let target_gitdir = normalize_path_components(&target_gitdir);
                     if target_gitdir.is_dir() {
                         let commondir_file = target_gitdir.join("commondir");
                         let common_dir = if commondir_file.is_file() {
                             let rel = std::fs::read_to_string(&commondir_file)?.trim().to_string();
-                            let joined = target_gitdir.join(rel);
-                            strip_verbatim_prefix(&joined.canonicalize().unwrap_or(joined))
+                            normalize_path_components(&target_gitdir.join(rel))
                         } else {
                             target_gitdir.clone()
                         };
@@ -315,8 +315,7 @@ impl RepoContext {
                         let commondir_file = git_dir.join("commondir");
                         let common_dir = if commondir_file.is_file() {
                             let rel = std::fs::read_to_string(&commondir_file)?.trim().to_string();
-                            let joined = git_dir.join(rel);
-                            strip_verbatim_prefix(&joined.canonicalize().unwrap_or(joined))
+                            normalize_path_components(&git_dir.join(rel))
                         } else {
                             git_dir.clone()
                         };
