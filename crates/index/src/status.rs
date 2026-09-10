@@ -5,9 +5,11 @@ use crate::IndexError;
 use oxidize_core::id::ObjectId;
 use oxidize_core::object::{FileMode, Object};
 use oxidize_core::store::ObjectReader;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use std::time::SystemTime;
 
 /// Status category of a file in the staging area (index vs HEAD).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,23 +121,54 @@ pub fn compute_status_with_ignore(
         }
     }
 
-    // 2. Unstaged changes: compare working tree with index
-    for (path, entry) in &index_map {
-        let full_path = repo_root.join(path);
-        if !full_path.exists() {
-            status.unstaged.push(UnstagedChange::Deleted(path.clone()));
-        } else if let Ok(meta) = fs::metadata(&full_path) {
-            let size = meta.len() as u32;
-            if let Ok(data) = fs::read(&full_path) {
-                let blob = Object::Blob(oxidize_core::object::Blob::new(data));
-                if blob.id() != entry.oid {
-                    status.unstaged.push(UnstagedChange::Modified(path.clone()));
+    // 2. Unstaged changes: compare working tree with index in parallel with Rayon
+    let mut unstaged: Vec<UnstagedChange> = index
+        .entries()
+        .par_iter()
+        .filter_map(|entry| {
+            let full_path = repo_root.join(&entry.path);
+            if !full_path.exists() {
+                Some(UnstagedChange::Deleted(entry.path.clone()))
+            } else if let Ok(meta) = fs::metadata(&full_path) {
+                let size = meta.len() as u32;
+                let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                let duration = mtime
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let mtime_sec = duration.as_secs() as u32;
+                let mtime_nsec = duration.subsec_nanos();
+
+                // Fast stat cache check: if size matches AND mtime matches, file is untouched!
+                if size == entry.file_size
+                    && entry.mtime_sec != 0
+                    && entry.mtime_sec == mtime_sec
+                    && entry.mtime_nsec == mtime_nsec
+                {
+                    None
+                } else if size != entry.file_size {
+                    Some(UnstagedChange::Modified(entry.path.clone()))
+                } else {
+                    // Size is equal but mtime changed. Hash to confirm actual content changes.
+                    if let Ok(data) = fs::read(&full_path) {
+                        let blob = Object::Blob(oxidize_core::object::Blob::new(data));
+                        if blob.id() != entry.oid {
+                            return Some(UnstagedChange::Modified(entry.path.clone()));
+                        }
+                    }
+                    None
                 }
-            } else if size != entry.file_size {
-                status.unstaged.push(UnstagedChange::Modified(path.clone()));
+            } else {
+                None
             }
-        }
-    }
+        })
+        .collect();
+    unstaged.sort_by(|a, b| match (a, b) {
+        (UnstagedChange::Modified(p1), UnstagedChange::Modified(p2)) => p1.cmp(p2),
+        (UnstagedChange::Deleted(p1), UnstagedChange::Deleted(p2)) => p1.cmp(p2),
+        (UnstagedChange::Modified(p1), UnstagedChange::Deleted(p2)) => p1.cmp(p2),
+        (UnstagedChange::Deleted(p1), UnstagedChange::Modified(p2)) => p1.cmp(p2),
+    });
+    status.unstaged = unstaged;
 
     // 3. Untracked files: scan working directory
     let mut tracked_or_ignored = BTreeSet::new();
@@ -201,9 +234,12 @@ fn scan_untracked(
         }
 
         if path.is_dir() {
-            // Check if directory contains any tracked files
+            // Check if directory contains any tracked files using O(log N) range lookup
             let dir_prefix = format!("{}/", rel_path);
-            let has_tracked = tracked.iter().any(|t| t.starts_with(&dir_prefix));
+            let has_tracked = tracked
+                .range(dir_prefix.clone()..)
+                .next()
+                .is_some_and(|s| s.starts_with(&dir_prefix));
             if has_tracked {
                 scan_untracked(root, &path, tracked, untracked, is_ignored)?;
             } else {

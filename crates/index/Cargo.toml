@@ -10,6 +10,7 @@ oxidize-core.workspace = true
 thiserror.workspace = true
 byteorder.workspace = true
 sha1.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
