@@ -1106,6 +1106,27 @@ fn get_head_info(
     Ok(("master".to_string(), None, None))
 }
 
+fn rel_path_from_root(target: &Path, root: &Path) -> Result<PathBuf> {
+    if let Ok(rel) = target.strip_prefix(root) {
+        return Ok(rel.to_path_buf());
+    }
+    #[cfg(windows)]
+    {
+        let canon_target = target
+            .canonicalize()
+            .map(|p| strip_verbatim_prefix(&p))
+            .unwrap_or_else(|_| target.to_path_buf());
+        let canon_root = root
+            .canonicalize()
+            .map(|p| strip_verbatim_prefix(&p))
+            .unwrap_or_else(|_| root.to_path_buf());
+        if let Ok(rel) = canon_target.strip_prefix(&canon_root) {
+            return Ok(rel.to_path_buf());
+        }
+    }
+    bail!("path '{}' is outside repository root", target.display())
+}
+
 fn cmd_add(files: Vec<String>) -> Result<()> {
     let ctx = RepoContext::discover(Path::new("."))?;
     let repo_root = ctx
@@ -1146,13 +1167,7 @@ fn cmd_add(files: Vec<String>) -> Result<()> {
         };
 
         // Determine path relative to repo_root
-        let rel_target = match target_path.strip_prefix(repo_root) {
-            Ok(p) => p,
-            Err(_) => bail!(
-                "path '{}' is outside repository root",
-                target_path.display()
-            ),
-        };
+        let rel_target = rel_path_from_root(&target_path, repo_root)?;
         let rel_target_str = rel_target.to_string_lossy().replace('\\', "/");
         let rel_target_str = rel_target_str.trim_matches('/').to_string();
 
@@ -1216,9 +1231,7 @@ fn cmd_add(files: Vec<String>) -> Result<()> {
     let entries: Vec<Result<IndexEntry>> = files_to_stage
         .par_iter()
         .map(|target| {
-            let rel_path = target
-                .strip_prefix(repo_root)
-                .with_context(|| format!("path '{}' is outside repository root", target.display()))?
+            let rel_path = rel_path_from_root(target, repo_root)?
                 .to_string_lossy()
                 .replace('\\', "/");
 
@@ -1266,7 +1279,7 @@ fn collect_files_to_add(
             if name_str == ".git" {
                 continue;
             }
-            if let Ok(rel) = path.strip_prefix(repo_root) {
+            if let Ok(rel) = rel_path_from_root(&path, repo_root) {
                 let rel_str = rel.to_string_lossy().replace('\\', "/");
                 let is_dir = path.is_dir();
                 let is_tracked = tracked_paths.contains(&rel_str);

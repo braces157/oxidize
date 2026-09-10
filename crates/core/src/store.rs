@@ -219,14 +219,21 @@ pub struct RepoContext {
 impl RepoContext {
     /// Discovers repository context starting from `start` and walking ancestor directories.
     pub fn discover(start: &Path) -> Result<Self, CoreError> {
-        let mut current = if start.is_relative() {
+        let full = if start.is_relative() {
             std::env::current_dir()?.join(start)
         } else {
             start.to_path_buf()
         };
 
-        if let Ok(canon) = current.canonicalize() {
-            current = strip_verbatim_prefix(&canon);
+        let mut current = PathBuf::new();
+        for comp in full.components() {
+            match comp {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    current.pop();
+                }
+                c => current.push(c),
+            }
         }
 
         loop {
@@ -236,15 +243,12 @@ impl RepoContext {
                 let commondir_file = candidate.join("commondir");
                 let common_dir = if commondir_file.is_file() {
                     let rel = std::fs::read_to_string(&commondir_file)?.trim().to_string();
-                    candidate.join(rel)
+                    let joined = candidate.join(rel);
+                    strip_verbatim_prefix(&joined.canonicalize().unwrap_or(joined))
                 } else {
                     candidate.clone()
                 };
 
-                let common_dir =
-                    strip_verbatim_prefix(&common_dir.canonicalize().unwrap_or(common_dir));
-                let candidate =
-                    strip_verbatim_prefix(&candidate.canonicalize().unwrap_or(candidate));
                 let worktree = Some(current.clone());
 
                 return Ok(Self {
@@ -271,12 +275,11 @@ impl RepoContext {
                         let commondir_file = target_gitdir.join("commondir");
                         let common_dir = if commondir_file.is_file() {
                             let rel = std::fs::read_to_string(&commondir_file)?.trim().to_string();
-                            target_gitdir.join(rel)
+                            let joined = target_gitdir.join(rel);
+                            strip_verbatim_prefix(&joined.canonicalize().unwrap_or(joined))
                         } else {
                             target_gitdir.clone()
                         };
-                        let common_dir =
-                            strip_verbatim_prefix(&common_dir.canonicalize().unwrap_or(common_dir));
                         return Ok(Self {
                             worktree: Some(current),
                             git_dir: target_gitdir,
@@ -308,21 +311,16 @@ impl RepoContext {
 
                 if is_named_git && !is_bare_config {
                     if let Some(parent) = current.parent() {
-                        let git_dir = strip_verbatim_prefix(
-                            &current.canonicalize().unwrap_or(current.clone()),
-                        );
+                        let git_dir = current.clone();
                         let commondir_file = git_dir.join("commondir");
                         let common_dir = if commondir_file.is_file() {
                             let rel = std::fs::read_to_string(&commondir_file)?.trim().to_string();
-                            git_dir.join(rel)
+                            let joined = git_dir.join(rel);
+                            strip_verbatim_prefix(&joined.canonicalize().unwrap_or(joined))
                         } else {
                             git_dir.clone()
                         };
-                        let common_dir =
-                            strip_verbatim_prefix(&common_dir.canonicalize().unwrap_or(common_dir));
-                        let worktree = strip_verbatim_prefix(
-                            &parent.canonicalize().unwrap_or(parent.to_path_buf()),
-                        );
+                        let worktree = parent.to_path_buf();
                         return Ok(Self {
                             worktree: Some(worktree),
                             git_dir,
@@ -332,7 +330,7 @@ impl RepoContext {
                     }
                 }
 
-                let bare_dir = strip_verbatim_prefix(&current.canonicalize().unwrap_or(current));
+                let bare_dir = current;
                 return Ok(Self {
                     worktree: None,
                     git_dir: bare_dir.clone(),
