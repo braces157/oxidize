@@ -1,7 +1,8 @@
 //! `ox` — Production-quality, daily-driver-capable Git implementation in Rust.
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use oxidize_config::{GitConfig, GitIgnore};
 use oxidize_core::store::parse_object_from_content;
 use oxidize_core::{
@@ -61,7 +62,7 @@ enum Commands {
 
     /// Provide content or type and size information for repository objects
     CatFile {
-        /// Pretty-print the contents of <object> based on its type
+        /// Pretty-print the contents of `<object>` based on its type
         #[arg(short = 'p')]
         pretty: bool,
 
@@ -459,6 +460,13 @@ enum Commands {
 
     /// Launch interactive terminal UI dashboard
     Ui,
+
+    /// Generate shell completions for the specified shell
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -482,14 +490,14 @@ enum StashCommand {
 
 #[derive(Subcommand, Debug)]
 enum RemoteCommand {
-    /// Add a remote named <name> for the repository at <url>
+    /// Add a remote named `<name>` for the repository at `<url>`
     Add {
         /// Name of the remote
         name: String,
         /// URL of the remote
         url: String,
     },
-    /// Remove the remote named <name>
+    /// Remove the remote named `<name>`
     Remove {
         /// Name of the remote
         name: String,
@@ -705,6 +713,10 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
         Commands::Ui => {
             let git_dir = find_git_dir(Path::new("."))?;
             oxidize_tui::run_tui(&git_dir)?;
+        }
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            generate(shell, &mut cmd, "ox", &mut io::stdout());
         }
         other => {
             println!("Command {:?} dispatched (stubbed in current phase)", other);

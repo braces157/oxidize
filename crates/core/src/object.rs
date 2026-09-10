@@ -170,7 +170,7 @@ impl fmt::Display for Signature {
 }
 
 impl Signature {
-    /// Parses a Git signature line e.g. "Name <email> 1234567890 +0000".
+    /// Parses a Git signature line e.g. `"Name <email> 1234567890 +0000"`.
     pub fn parse(s: &str) -> Result<Self, crate::error::CoreError> {
         let open_bracket = s
             .find('<')

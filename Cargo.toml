@@ -16,9 +16,16 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
 authors = ["Oxidize Contributors"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/oxidize/ox"
+repository = "https://github.com/braces157/oxidize"
+homepage = "https://github.com/braces157/oxidize"
+documentation = "https://docs.rs/ox"
+readme = "README.md"
+description = "A from-scratch, byte-compatible, multi-threaded reimplementation of Git in pure Rust"
+keywords = ["git", "vcs", "tui", "performance", "cli"]
+categories = ["command-line-utilities", "development-tools", "development-tools::version-control"]
 
 [workspace.dependencies]
 # Internal workspace crates
@@ -37,6 +44,7 @@ anyhow = "1.0"
 
 # CLI & Output
 clap = { version = "4.5", features = ["derive", "cargo"] }
+clap_complete = "4.5"
 
 # Hashing & Compression
 sha1 = "0.10"

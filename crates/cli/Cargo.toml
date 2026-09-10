@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [[bin]]
 name = "ox"
@@ -20,6 +26,7 @@ oxidize-config.workspace = true
 oxidize-tui.workspace = true
 
 clap.workspace = true
+clap_complete.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
