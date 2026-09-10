@@ -458,7 +458,8 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Launch interactive terminal UI dashboard
+    /// Launch interactive terminal UI dashboard (LazyOx / LazyGit replica)
+    #[command(alias = "lazygit", alias = "lg", alias = "tui")]
     Ui,
 
     /// Generate shell completions for the specified shell
@@ -593,6 +594,9 @@ fn expand_aliases(raw_args: Vec<String>) -> Vec<String> {
         "df" => Some("diff"),
         "rb" => Some("rebase"),
         "cp" => Some("cherry-pick"),
+        "lg" => Some("ui"),
+        "lazygit" => Some("ui"),
+        "tui" => Some("ui"),
         _ => None,
     };
 
@@ -765,7 +769,8 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
         Commands::Bisect { args } => cmd_bisect(args)?,
         Commands::Reflog => cmd_reflog()?,
         Commands::Ui => {
-            let git_dir = find_git_dir(Path::new("."))?;
+            let git_dir = find_git_dir(Path::new("."))
+                .context("fatal: not a git repository (or any of the parent directories): .git")?;
             oxidize_tui::run_tui(&git_dir)?;
         }
         Commands::Completions { shell } => {

@@ -1,8 +1,7 @@
-//! TUI Application state, multi-panel repository data loader, and live diff inspector.
-
 use crate::model::{
-    ActiveModal, BranchItem, CommitItem, DiffLine, DiffLineKind, DiffView, FileItem,
-    FileStatusKind, Panel, StashItem, TabMode,
+    ActiveModal, BranchItem, BranchesTab, CommitItem, CommitsTab, DiffLine, DiffLineKind,
+    DiffView, FileItem, FileStatusKind, FocusedWindow, Panel, ReflogItem, RemoteItem, StashItem,
+    TabMode, TagItem,
 };
 use crate::ops;
 use crate::TuiError;
@@ -26,6 +25,12 @@ pub struct App {
     pub branch_name: String,
     /// Active docked panel in focus.
     pub active_panel: Panel,
+    /// Active sub-tab inside Branches panel (Local, Remotes, Tags).
+    pub branches_tab: BranchesTab,
+    /// Active sub-tab inside Commits panel (Commits, Reflog).
+    pub commits_tab: CommitsTab,
+    /// Focused window (Sidebar or Inspector for Vim h/l navigation).
+    pub focused_window: FocusedWindow,
 
     /// Changed files in working tree and staging area.
     pub files: Vec<FileItem>,
@@ -37,15 +42,33 @@ pub struct App {
     /// Selected index in branches list.
     pub branches_selected: usize,
 
+    /// Configured remote repositories.
+    pub remotes: Vec<RemoteItem>,
+    /// Selected index in remotes list.
+    pub remotes_selected: usize,
+
+    /// Repository tags.
+    pub tags: Vec<TagItem>,
+    /// Selected index in tags list.
+    pub tags_selected: usize,
+
     /// Loaded commit history.
     pub commits: Vec<CommitItem>,
     /// Selected index in commits list.
     pub commits_selected: usize,
 
+    /// Reflog history entries.
+    pub reflog: Vec<ReflogItem>,
+    /// Selected index in reflog list.
+    pub reflog_selected: usize,
+
     /// Stash stack items.
     pub stashes: Vec<StashItem>,
     /// Selected index in stash list.
     pub stashes_selected: usize,
+
+    /// Ahead/behind commits count compared to remote upstream.
+    pub ahead_behind: (usize, usize),
 
     /// Vertical scroll offset in the right Inspector pane.
     pub inspector_scroll: usize,
@@ -83,14 +106,24 @@ impl App {
             git_dir: PathBuf::new(),
             branch_name: "master".to_string(),
             active_panel: Panel::Files,
+            branches_tab: BranchesTab::Local,
+            commits_tab: CommitsTab::Commits,
+            focused_window: FocusedWindow::Sidebar,
             files: Vec::new(),
             files_selected: 0,
             branches: Vec::new(),
             branches_selected: 0,
+            remotes: Vec::new(),
+            remotes_selected: 0,
+            tags: Vec::new(),
+            tags_selected: 0,
             commits: Vec::new(),
             commits_selected: 0,
+            reflog: Vec::new(),
+            reflog_selected: 0,
             stashes: Vec::new(),
             stashes_selected: 0,
+            ahead_behind: (0, 0),
             inspector_scroll: 0,
             cached_diff: None,
             active_modal: ActiveModal::None,
@@ -235,6 +268,14 @@ impl App {
             }
         }
 
+        // 6. Load remotes, tags, and reflog
+        self.remotes = ops::read_remotes(git_dir);
+        self.tags = ops::read_tags(git_dir);
+        self.reflog = ops::read_reflog(git_dir);
+
+        // 7. Calculate ahead / behind relative to upstream
+        self.ahead_behind = self.compute_ahead_behind(&store);
+
         // Clamp selection indices
         self.clamp_selections();
 
@@ -363,6 +404,22 @@ impl App {
             self.branches_selected = 0;
         }
 
+        if !self.remotes.is_empty() {
+            if self.remotes_selected >= self.remotes.len() {
+                self.remotes_selected = self.remotes.len() - 1;
+            }
+        } else {
+            self.remotes_selected = 0;
+        }
+
+        if !self.tags.is_empty() {
+            if self.tags_selected >= self.tags.len() {
+                self.tags_selected = self.tags.len() - 1;
+            }
+        } else {
+            self.tags_selected = 0;
+        }
+
         if !self.commits.is_empty() {
             if self.commits_selected >= self.commits.len() {
                 self.commits_selected = self.commits.len() - 1;
@@ -371,6 +428,14 @@ impl App {
             self.commits_selected = 0;
         }
         self.selected_index = self.commits_selected;
+
+        if !self.reflog.is_empty() {
+            if self.reflog_selected >= self.reflog.len() {
+                self.reflog_selected = self.reflog.len() - 1;
+            }
+        } else {
+            self.reflog_selected = 0;
+        }
 
         if !self.stashes.is_empty() {
             if self.stashes_selected >= self.stashes.len() {
@@ -402,25 +467,50 @@ impl App {
         self.select_panel(self.active_panel.prev());
     }
 
-    /// Moves selection down within the currently active panel.
+    /// Moves selection down within the currently active panel or scrolls inspector.
     pub fn next_item(&mut self) {
+        if self.focused_window == FocusedWindow::Inspector {
+            self.scroll_inspector_down(1);
+            return;
+        }
+
         match self.active_panel {
+            Panel::Status => {}
             Panel::Files => {
                 if !self.files.is_empty() && self.files_selected + 1 < self.files.len() {
                     self.files_selected += 1;
                 }
             }
-            Panel::Branches => {
-                if !self.branches.is_empty() && self.branches_selected + 1 < self.branches.len() {
-                    self.branches_selected += 1;
+            Panel::Branches => match self.branches_tab {
+                BranchesTab::Local => {
+                    if !self.branches.is_empty() && self.branches_selected + 1 < self.branches.len() {
+                        self.branches_selected += 1;
+                    }
                 }
-            }
-            Panel::Commits => {
-                if !self.commits.is_empty() && self.commits_selected + 1 < self.commits.len() {
-                    self.commits_selected += 1;
-                    self.selected_index = self.commits_selected;
+                BranchesTab::Remotes => {
+                    if !self.remotes.is_empty() && self.remotes_selected + 1 < self.remotes.len() {
+                        self.remotes_selected += 1;
+                    }
                 }
-            }
+                BranchesTab::Tags => {
+                    if !self.tags.is_empty() && self.tags_selected + 1 < self.tags.len() {
+                        self.tags_selected += 1;
+                    }
+                }
+            },
+            Panel::Commits => match self.commits_tab {
+                CommitsTab::Commits => {
+                    if !self.commits.is_empty() && self.commits_selected + 1 < self.commits.len() {
+                        self.commits_selected += 1;
+                        self.selected_index = self.commits_selected;
+                    }
+                }
+                CommitsTab::Reflog => {
+                    if !self.reflog.is_empty() && self.reflog_selected + 1 < self.reflog.len() {
+                        self.reflog_selected += 1;
+                    }
+                }
+            },
             Panel::Stash => {
                 if !self.stashes.is_empty() && self.stashes_selected + 1 < self.stashes.len() {
                     self.stashes_selected += 1;
@@ -431,25 +521,50 @@ impl App {
         self.update_inspector();
     }
 
-    /// Moves selection up within the currently active panel.
+    /// Moves selection up within the currently active panel or scrolls inspector.
     pub fn prev_item(&mut self) {
+        if self.focused_window == FocusedWindow::Inspector {
+            self.scroll_inspector_up(1);
+            return;
+        }
+
         match self.active_panel {
+            Panel::Status => {}
             Panel::Files => {
                 if self.files_selected > 0 {
                     self.files_selected -= 1;
                 }
             }
-            Panel::Branches => {
-                if self.branches_selected > 0 {
-                    self.branches_selected -= 1;
+            Panel::Branches => match self.branches_tab {
+                BranchesTab::Local => {
+                    if self.branches_selected > 0 {
+                        self.branches_selected -= 1;
+                    }
                 }
-            }
-            Panel::Commits => {
-                if self.commits_selected > 0 {
-                    self.commits_selected -= 1;
-                    self.selected_index = self.commits_selected;
+                BranchesTab::Remotes => {
+                    if self.remotes_selected > 0 {
+                        self.remotes_selected -= 1;
+                    }
                 }
-            }
+                BranchesTab::Tags => {
+                    if self.tags_selected > 0 {
+                        self.tags_selected -= 1;
+                    }
+                }
+            },
+            Panel::Commits => match self.commits_tab {
+                CommitsTab::Commits => {
+                    if self.commits_selected > 0 {
+                        self.commits_selected -= 1;
+                        self.selected_index = self.commits_selected;
+                    }
+                }
+                CommitsTab::Reflog => {
+                    if self.reflog_selected > 0 {
+                        self.reflog_selected -= 1;
+                    }
+                }
+            },
             Panel::Stash => {
                 if self.stashes_selected > 0 {
                     self.stashes_selected -= 1;
@@ -458,6 +573,54 @@ impl App {
         }
         self.inspector_scroll = 0;
         self.update_inspector();
+    }
+
+    /// Switches to next tab within the active panel (bound to ']').
+    pub fn next_tab(&mut self) {
+        match self.active_panel {
+            Panel::Branches => {
+                self.branches_tab = self.branches_tab.next();
+            }
+            Panel::Commits => {
+                self.commits_tab = self.commits_tab.next();
+            }
+            _ => {}
+        }
+        self.inspector_scroll = 0;
+        self.update_inspector();
+    }
+
+    /// Switches to previous tab within the active panel (bound to '[').
+    pub fn prev_tab(&mut self) {
+        match self.active_panel {
+            Panel::Branches => {
+                self.branches_tab = self.branches_tab.prev();
+            }
+            Panel::Commits => {
+                self.commits_tab = self.commits_tab.prev();
+            }
+            _ => {}
+        }
+        self.inspector_scroll = 0;
+        self.update_inspector();
+    }
+
+    /// Focuses the right-hand Inspector window (Vim 'l' or Enter).
+    pub fn focus_inspector(&mut self) {
+        self.focused_window = FocusedWindow::Inspector;
+    }
+
+    /// Focuses the left sidebar panels (Vim 'h' or Esc).
+    pub fn focus_sidebar(&mut self) {
+        self.focused_window = FocusedWindow::Sidebar;
+    }
+
+    /// Toggles focus between sidebar and inspector.
+    pub fn toggle_focus(&mut self) {
+        self.focused_window = match self.focused_window {
+            FocusedWindow::Sidebar => FocusedWindow::Inspector,
+            FocusedWindow::Inspector => FocusedWindow::Sidebar,
+        };
     }
 
     /// Scrolls inspector view downwards by the given number of lines.
@@ -479,6 +642,21 @@ impl App {
         self.inspector_scroll = self.inspector_scroll.saturating_sub(lines);
     }
 
+    /// Scrolls inspector to the top line (line 0).
+    pub fn scroll_inspector_top(&mut self) {
+        self.inspector_scroll = 0;
+    }
+
+    /// Scrolls inspector to the bottom line.
+    pub fn scroll_inspector_bottom(&mut self) {
+        let max_lines = self
+            .cached_diff
+            .as_ref()
+            .map(|d| d.lines.len())
+            .unwrap_or(0);
+        self.inspector_scroll = max_lines.saturating_sub(1);
+    }
+
     /// Currently highlighted file item, if any.
     pub fn selected_file(&self) -> Option<&FileItem> {
         self.files.get(self.files_selected)
@@ -489,9 +667,24 @@ impl App {
         self.branches.get(self.branches_selected)
     }
 
+    /// Currently highlighted remote item, if any.
+    pub fn selected_remote(&self) -> Option<&RemoteItem> {
+        self.remotes.get(self.remotes_selected)
+    }
+
+    /// Currently highlighted tag item, if any.
+    pub fn selected_tag(&self) -> Option<&TagItem> {
+        self.tags.get(self.tags_selected)
+    }
+
     /// Currently highlighted commit item, if any.
     pub fn selected_commit(&self) -> Option<&CommitItem> {
         self.commits.get(self.commits_selected)
+    }
+
+    /// Currently highlighted reflog item, if any.
+    pub fn selected_reflog(&self) -> Option<&ReflogItem> {
+        self.reflog.get(self.reflog_selected)
     }
 
     /// Currently highlighted stash item, if any.
@@ -516,6 +709,9 @@ impl App {
         };
 
         match self.active_panel {
+            Panel::Status => {
+                self.cached_diff = Some(self.compute_status_overview());
+            }
             Panel::Files => {
                 if let Some(file) = self.selected_file().cloned() {
                     self.cached_diff = Some(self.compute_file_diff(&store, &file));
@@ -523,20 +719,33 @@ impl App {
                     self.cached_diff = Some(DiffView::new("No changed files in working tree"));
                 }
             }
-            Panel::Branches => {
-                if let Some(branch) = self.selected_branch().cloned() {
-                    self.cached_diff = Some(self.compute_branch_view(&store, &branch));
-                } else {
-                    self.cached_diff = Some(DiffView::new("No branches"));
+            Panel::Branches => match self.branches_tab {
+                BranchesTab::Local => {
+                    if let Some(branch) = self.selected_branch().cloned() {
+                        self.cached_diff = Some(self.compute_branch_view(&store, &branch));
+                    } else {
+                        self.cached_diff = Some(DiffView::new("No local branches"));
+                    }
                 }
-            }
-            Panel::Commits => {
-                if let Some(commit) = self.selected_commit().cloned() {
-                    self.cached_diff = Some(self.compute_commit_diff(&store, &commit));
-                } else {
-                    self.cached_diff = Some(DiffView::new("No commits in repository"));
+                BranchesTab::Remotes => {
+                    self.cached_diff = Some(self.compute_remotes_view());
                 }
-            }
+                BranchesTab::Tags => {
+                    self.cached_diff = Some(self.compute_tags_view(&store));
+                }
+            },
+            Panel::Commits => match self.commits_tab {
+                CommitsTab::Commits => {
+                    if let Some(commit) = self.selected_commit().cloned() {
+                        self.cached_diff = Some(self.compute_commit_diff(&store, &commit));
+                    } else {
+                        self.cached_diff = Some(DiffView::new("No commits in repository"));
+                    }
+                }
+                CommitsTab::Reflog => {
+                    self.cached_diff = Some(self.compute_reflog_view(&store));
+                }
+            },
             Panel::Stash => {
                 if let Some(stash) = self.selected_stash().cloned() {
                     self.cached_diff = Some(self.compute_stash_view(&store, &stash));
@@ -544,6 +753,203 @@ impl App {
                     self.cached_diff = Some(DiffView::new("Stash stack is empty"));
                 }
             }
+        }
+    }
+
+    fn compute_ahead_behind(&self, store: &RepoObjectStore) -> (usize, usize) {
+        let remote_branch = self.branches.iter().find(|b| {
+            b.is_remote
+                && (b.name == format!("origin/{}", self.branch_name)
+                    || b.name.ends_with(&format!("/{}", self.branch_name)))
+        });
+
+        if let Some(rb) = remote_branch {
+            if let (Some(head_commit), Some(remote_oid)) = (self.commits.first(), rb.commit_oid) {
+                if head_commit.oid == remote_oid {
+                    return (0, 0);
+                }
+
+                let head_set: HashSet<ObjectId> = self.commits.iter().map(|c| c.oid).collect();
+                let mut remote_set = HashSet::new();
+                let mut queue = VecDeque::new();
+                queue.push_back(remote_oid);
+                remote_set.insert(remote_oid);
+
+                while let Some(oid) = queue.pop_front() {
+                    if let Ok(Object::Commit(c)) = store.read_object(&oid) {
+                        for p in c.parents {
+                            if remote_set.insert(p) {
+                                queue.push_back(p);
+                            }
+                        }
+                    }
+                }
+
+                let ahead = head_set.iter().filter(|oid| !remote_set.contains(oid)).count();
+                let behind = remote_set.iter().filter(|oid| !head_set.contains(oid)).count();
+                return (ahead, behind);
+            }
+        }
+        (0, 0)
+    }
+
+    fn compute_status_overview(&self) -> DiffView {
+        let mut lines = Vec::new();
+        let repo_name = self
+            .repo_root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Repository".to_string());
+
+        lines.push(DiffLine::new(format!("Repository:   {}", repo_name), DiffLineKind::Header));
+        lines.push(DiffLine::new(format!("Path:         {}", self.repo_root.display()), DiffLineKind::Normal));
+        lines.push(DiffLine::new(format!("Branch:       * {}", self.branch_name), DiffLineKind::Header));
+        lines.push(DiffLine::new(
+            format!("Upstream:     ↑{} ahead, ↓{} behind", self.ahead_behind.0, self.ahead_behind.1),
+            DiffLineKind::Normal,
+        ));
+
+        let staged_count = self.files.iter().filter(|f| f.kind.is_staged()).count();
+        let unstaged_count = self.files.iter().filter(|f| !f.kind.is_staged() && f.kind != FileStatusKind::Untracked).count();
+        let untracked_count = self.files.iter().filter(|f| f.kind == FileStatusKind::Untracked).count();
+
+        lines.push(DiffLine::new(
+            format!("Working Tree: {} staged, {} unstaged, {} untracked", staged_count, unstaged_count, untracked_count),
+            if staged_count + unstaged_count + untracked_count == 0 {
+                DiffLineKind::Addition
+            } else {
+                DiffLineKind::Deletion
+            },
+        ));
+        lines.push(DiffLine::new(format!("Total Commits: {}", self.commits.len()), DiffLineKind::Normal));
+        lines.push(DiffLine::new("Engine:        Oxidize LazyOx v0.1.0 (Pure Rust Git)", DiffLineKind::Normal));
+
+        lines.push(DiffLine::new("", DiffLineKind::Normal));
+        lines.push(DiffLine::new("--- Configured Remotes ---", DiffLineKind::Header));
+        if self.remotes.is_empty() {
+            lines.push(DiffLine::new("  (no remotes configured)", DiffLineKind::Context));
+        } else {
+            for r in &self.remotes {
+                lines.push(DiffLine::new(format!("  {} -> {}", r.name, r.url), DiffLineKind::Normal));
+            }
+        }
+
+        lines.push(DiffLine::new("", DiffLineKind::Normal));
+        lines.push(DiffLine::new("--- Recent Commits ---", DiffLineKind::Header));
+        if self.commits.is_empty() {
+            lines.push(DiffLine::new("  (no commits yet)", DiffLineKind::Context));
+        } else {
+            for c in self.commits.iter().take(5) {
+                lines.push(DiffLine::new(
+                    format!("  * {} {} ({})", c.short_oid, c.summary, c.author),
+                    DiffLineKind::Normal,
+                ));
+            }
+        }
+
+        DiffView {
+            title: "Repository Status Overview".to_string(),
+            lines,
+        }
+    }
+
+    fn compute_remotes_view(&self) -> DiffView {
+        let mut lines = Vec::new();
+        lines.push(DiffLine::new("Configured Remote Repositories", DiffLineKind::Header));
+        lines.push(DiffLine::new("", DiffLineKind::Normal));
+
+        if self.remotes.is_empty() {
+            lines.push(DiffLine::new("No remotes configured in .git/config", DiffLineKind::Context));
+            lines.push(DiffLine::new("Add a remote with: git remote add <name> <url>", DiffLineKind::Normal));
+        } else {
+            for (idx, r) in self.remotes.iter().enumerate() {
+                let is_sel = idx == self.remotes_selected;
+                let prefix = if is_sel { "> " } else { "  " };
+                lines.push(DiffLine::new(
+                    format!("{}{}", prefix, r.name),
+                    if is_sel { DiffLineKind::Addition } else { DiffLineKind::Header },
+                ));
+                lines.push(DiffLine::new(format!("    URL: {}", r.url), DiffLineKind::Normal));
+            }
+        }
+
+        let title = if let Some(r) = self.selected_remote() {
+            format!("Remote: {}", r.name)
+        } else {
+            "Remotes Overview".to_string()
+        };
+
+        DiffView {
+            title,
+            lines,
+        }
+    }
+
+    fn compute_tags_view(&self, store: &RepoObjectStore) -> DiffView {
+        let mut lines = Vec::new();
+        let title = if let Some(tag) = self.selected_tag() {
+            format!("Tag: {}", tag.name)
+        } else {
+            "Tags Inspector".to_string()
+        };
+
+        if let Some(tag) = self.selected_tag() {
+            lines.push(DiffLine::new(format!("Tag:    {}", tag.name), DiffLineKind::Header));
+            lines.push(DiffLine::new(format!("Commit: {}", tag.oid), DiffLineKind::Header));
+
+            if let Ok(Object::Commit(c)) = store.read_object(&tag.oid) {
+                lines.push(DiffLine::new(
+                    format!("Author: {} <{}>", c.author.name, c.author.email),
+                    DiffLineKind::Normal,
+                ));
+                lines.push(DiffLine::new("", DiffLineKind::Normal));
+                for msg_line in c.message.lines() {
+                    lines.push(DiffLine::new(format!("    {}", msg_line), DiffLineKind::Normal));
+                }
+            }
+        } else {
+            lines.push(DiffLine::new("No tags in repository", DiffLineKind::Context));
+            lines.push(DiffLine::new("Create a tag with: git tag <tagname>", DiffLineKind::Normal));
+        }
+
+        DiffView {
+            title,
+            lines,
+        }
+    }
+
+    fn compute_reflog_view(&self, store: &RepoObjectStore) -> DiffView {
+        let mut lines = Vec::new();
+        let title = if let Some(entry) = self.selected_reflog() {
+            format!("Reflog: {}", entry.selector)
+        } else {
+            "Reflog Inspector".to_string()
+        };
+
+        if let Some(entry) = self.selected_reflog() {
+            lines.push(DiffLine::new(format!("Reflog:  {}", entry.selector), DiffLineKind::Header));
+            lines.push(DiffLine::new(format!("Action:  {}", entry.action), DiffLineKind::Header));
+            lines.push(DiffLine::new(format!("Commit:  {}", entry.oid), DiffLineKind::Normal));
+            lines.push(DiffLine::new(format!("Message: {}", entry.message), DiffLineKind::Normal));
+
+            if let Ok(Object::Commit(c)) = store.read_object(&entry.oid) {
+                lines.push(DiffLine::new("", DiffLineKind::Normal));
+                lines.push(DiffLine::new(
+                    format!("Author:  {} <{}>", c.author.name, c.author.email),
+                    DiffLineKind::Normal,
+                ));
+                lines.push(DiffLine::new("", DiffLineKind::Normal));
+                for msg_line in c.message.lines() {
+                    lines.push(DiffLine::new(format!("    {}", msg_line), DiffLineKind::Normal));
+                }
+            }
+        } else {
+            lines.push(DiffLine::new("Reflog is empty", DiffLineKind::Context));
+        }
+
+        DiffView {
+            title,
+            lines,
         }
     }
 
@@ -895,6 +1301,14 @@ impl App {
             ActiveModal::CommitPrompt {
                 ref mut message,
                 ref mut cursor,
+            }
+            | ActiveModal::CommitAmend {
+                ref mut message,
+                ref mut cursor,
+            }
+            | ActiveModal::StashSave {
+                ref mut message,
+                ref mut cursor,
             } => {
                 if *cursor <= message.len() {
                     message.insert(*cursor, c);
@@ -920,6 +1334,14 @@ impl App {
             ActiveModal::CommitPrompt {
                 ref mut message,
                 ref mut cursor,
+            }
+            | ActiveModal::CommitAmend {
+                ref mut message,
+                ref mut cursor,
+            }
+            | ActiveModal::StashSave {
+                ref mut message,
+                ref mut cursor,
             } => {
                 if *cursor > 0 && *cursor <= message.len() {
                     message.remove(*cursor - 1);
@@ -943,6 +1365,8 @@ impl App {
     pub fn handle_modal_left(&mut self) {
         match self.active_modal {
             ActiveModal::CommitPrompt { ref mut cursor, .. }
+            | ActiveModal::CommitAmend { ref mut cursor, .. }
+            | ActiveModal::StashSave { ref mut cursor, .. }
             | ActiveModal::BranchCreate { ref mut cursor, .. } => {
                 if *cursor > 0 {
                     *cursor -= 1;
@@ -956,6 +1380,14 @@ impl App {
     pub fn handle_modal_right(&mut self) {
         match self.active_modal {
             ActiveModal::CommitPrompt {
+                ref message,
+                ref mut cursor,
+            }
+            | ActiveModal::CommitAmend {
+                ref message,
+                ref mut cursor,
+            }
+            | ActiveModal::StashSave {
                 ref message,
                 ref mut cursor,
             } => {
@@ -995,6 +1427,23 @@ impl App {
                 self.active_modal = ActiveModal::None;
                 self.refresh()?;
             }
+            ActiveModal::CommitAmend { message, .. } => {
+                let trimmed = message.trim();
+                if trimmed.is_empty() {
+                    self.status_message = Some("Amend aborted: empty commit message".to_string());
+                    self.active_modal = ActiveModal::None;
+                    return Ok(());
+                }
+
+                let commit_oid = ops::amend_commit(&self.repo_root, &self.git_dir, trimmed)?;
+                let short_sha = &commit_oid.to_string()[..7];
+                self.status_message = Some(format!(
+                    "✓ Amended commit [{}] {}",
+                    short_sha, trimmed
+                ));
+                self.active_modal = ActiveModal::None;
+                self.refresh()?;
+            }
             ActiveModal::BranchCreate { name, .. } => {
                 let trimmed = name.trim();
                 if trimmed.is_empty() {
@@ -1011,12 +1460,54 @@ impl App {
                 self.active_modal = ActiveModal::None;
                 self.refresh()?;
             }
+            ActiveModal::StashSave { message, .. } => {
+                let stash_oid = ops::stash_save(&self.repo_root, &self.git_dir, message.trim())?;
+                let short_sha = &stash_oid.to_string()[..7];
+                self.status_message = Some(format!("✓ Saved stash [{}]", short_sha));
+                self.active_modal = ActiveModal::None;
+                self.refresh()?;
+            }
             ActiveModal::Help => {
                 self.active_modal = ActiveModal::None;
             }
             _ => {
                 self.active_modal = ActiveModal::None;
             }
+        }
+        Ok(())
+    }
+
+    /// Opens the amend commit modal dialog.
+    pub fn open_amend_modal(&mut self) {
+        if let Some(last_commit) = self.commits.first() {
+            let msg = last_commit.full_message.trim().to_string();
+            let len = msg.len();
+            self.active_modal = ActiveModal::CommitAmend {
+                message: msg,
+                cursor: len,
+            };
+        } else {
+            self.status_message = Some("Cannot amend: repository has no commits".to_string());
+        }
+    }
+
+    /// Opens the save stash modal dialog.
+    pub fn open_stash_save_modal(&mut self) {
+        self.active_modal = ActiveModal::StashSave {
+            message: String::new(),
+            cursor: 0,
+        };
+    }
+
+    /// Applies the selected stash entry without dropping it.
+    pub fn apply_selected_stash(&mut self) -> Result<(), TuiError> {
+        if self.active_panel != Panel::Stash {
+            return Ok(());
+        }
+        if let Some(stash) = self.selected_stash().cloned() {
+            ops::apply_stash(&self.repo_root, &self.git_dir, &stash.oid)?;
+            self.status_message = Some(format!("✓ Applied stash@{{{}}}", stash.index));
+            self.refresh()?;
         }
         Ok(())
     }
@@ -1095,6 +1586,68 @@ impl App {
             ops::drop_stash(&self.git_dir)?;
             self.status_message = Some(format!("✓ Dropped stash@{{{}}}", s.index));
             self.refresh()?;
+        }
+        Ok(())
+    }
+
+    /// Pushes commits to remote repository (bound to 'P').
+    pub fn push(&mut self) -> Result<(), TuiError> {
+        self.status_message = Some("Pushing commits to remote...".to_string());
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["push"]).current_dir(&self.repo_root);
+        let output = cmd.output().or_else(|_| {
+            std::process::Command::new("ox")
+                .args(["push"])
+                .current_dir(&self.repo_root)
+                .output()
+        });
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let msg = String::from_utf8_lossy(&out.stderr);
+                let first_line = msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("Pushed to remote");
+                self.status_message = Some(format!("✓ {}", first_line));
+                let _ = self.refresh();
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let err_first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("Push failed");
+                self.status_message = Some(format!("✗ Push failed: {}", err_first));
+            }
+            Err(e) => {
+                self.status_message = Some(format!("✗ Push error: {}", e));
+            }
+        }
+        Ok(())
+    }
+
+    /// Pulls latest commits from remote repository (bound to 'p').
+    pub fn pull(&mut self) -> Result<(), TuiError> {
+        self.status_message = Some("Pulling from remote...".to_string());
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["pull"]).current_dir(&self.repo_root);
+        let output = cmd.output().or_else(|_| {
+            std::process::Command::new("ox")
+                .args(["pull"])
+                .current_dir(&self.repo_root)
+                .output()
+        });
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let msg = String::from_utf8_lossy(&out.stdout);
+                let first_line = msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("Pulled from remote");
+                self.status_message = Some(format!("✓ {}", first_line));
+                let _ = self.refresh();
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let err_first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("Pull failed");
+                self.status_message = Some(format!("✗ Pull failed: {}", err_first));
+            }
+            Err(e) => {
+                self.status_message = Some(format!("✗ Pull error: {}", e));
+            }
         }
         Ok(())
     }

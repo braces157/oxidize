@@ -3,59 +3,158 @@
 use oxidize_core::id::ObjectId;
 use ratatui::style::Color;
 
-/// Available docked panels in the interface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Available docked panels in the interface (matching authentic LazyGit 1-5 layout).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Panel {
-    /// Working tree files: Staged, Unstaged, Untracked.
+    /// [1] Repository status, current branch & tracking overview.
+    Status,
+    /// [2] Working tree files: Staged, Unstaged, Untracked.
+    #[default]
     Files,
-    /// Local and remote branch references.
+    /// [3] Local branches, remotes, and tags.
     Branches,
-    /// Commit log history.
+    /// [4] Commit log history and reflog.
     Commits,
-    /// Stash stack entries.
+    /// [5] Stash stack entries.
     Stash,
 }
 
 impl Panel {
-    /// Numerical shortcut 1-4 for quick jumping.
+    /// Numerical shortcut 1-5 for quick jumping.
     pub fn index(self) -> usize {
         match self {
-            Panel::Files => 1,
-            Panel::Branches => 2,
-            Panel::Commits => 3,
-            Panel::Stash => 4,
+            Panel::Status => 1,
+            Panel::Files => 2,
+            Panel::Branches => 3,
+            Panel::Commits => 4,
+            Panel::Stash => 5,
+        }
+    }
+
+    /// Creates Panel from 1-based index.
+    pub fn from_index(idx: usize) -> Option<Self> {
+        match idx {
+            1 => Some(Panel::Status),
+            2 => Some(Panel::Files),
+            3 => Some(Panel::Branches),
+            4 => Some(Panel::Commits),
+            5 => Some(Panel::Stash),
+            _ => None,
         }
     }
 
     /// Title with keyboard shortcut badge.
     pub fn title(self) -> &'static str {
         match self {
-            Panel::Files => "1 Files",
-            Panel::Branches => "2 Branches",
-            Panel::Commits => "3 Commits",
-            Panel::Stash => "4 Stash",
+            Panel::Status => "1 Status",
+            Panel::Files => "2 Files",
+            Panel::Branches => "3 Branches",
+            Panel::Commits => "4 Commits",
+            Panel::Stash => "5 Stash",
         }
     }
 
     /// Cycles to the next panel in order.
     pub fn next(self) -> Self {
         match self {
+            Panel::Status => Panel::Files,
             Panel::Files => Panel::Branches,
             Panel::Branches => Panel::Commits,
             Panel::Commits => Panel::Stash,
-            Panel::Stash => Panel::Files,
+            Panel::Stash => Panel::Status,
         }
     }
 
     /// Cycles to the previous panel in order.
     pub fn prev(self) -> Self {
         match self {
-            Panel::Files => Panel::Stash,
+            Panel::Status => Panel::Stash,
+            Panel::Files => Panel::Status,
             Panel::Branches => Panel::Files,
             Panel::Commits => Panel::Branches,
             Panel::Stash => Panel::Commits,
         }
     }
+}
+
+/// Sub-tabs within the Branches panel (switched via '[' and ']').
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BranchesTab {
+    #[default]
+    Local,
+    Remotes,
+    Tags,
+}
+
+impl BranchesTab {
+    /// Title header for the tab.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Local => "Local Branches",
+            Self::Remotes => "Remotes",
+            Self::Tags => "Tags",
+        }
+    }
+
+    /// Next tab in cycle.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Local => Self::Remotes,
+            Self::Remotes => Self::Tags,
+            Self::Tags => Self::Local,
+        }
+    }
+
+    /// Previous tab in cycle.
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Local => Self::Tags,
+            Self::Remotes => Self::Local,
+            Self::Tags => Self::Remotes,
+        }
+    }
+}
+
+/// Sub-tabs within the Commits panel (switched via '[' and ']').
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CommitsTab {
+    #[default]
+    Commits,
+    Reflog,
+}
+
+impl CommitsTab {
+    /// Title header for the tab.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Commits => "Commits",
+            Self::Reflog => "Reflog",
+        }
+    }
+
+    /// Next tab in cycle.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Commits => Self::Reflog,
+            Self::Reflog => Self::Commits,
+        }
+    }
+
+    /// Previous tab in cycle.
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Commits => Self::Reflog,
+            Self::Reflog => Self::Commits,
+        }
+    }
+}
+
+/// Active focused window (Vim-style h/l switching).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FocusedWindow {
+    #[default]
+    Sidebar,
+    Inspector,
 }
 
 /// Detailed file status change category.
@@ -278,6 +377,45 @@ pub enum TabMode {
     Status,
 }
 
+/// Represents a configured remote repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteItem {
+    /// Remote identifier (e.g. "origin").
+    pub name: String,
+    /// Configured fetch or push URL.
+    pub url: String,
+}
+
+/// Represents a Git tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagItem {
+    /// Tag name (e.g. "v0.1.0").
+    pub name: String,
+    /// Commit object ID pointed to by the tag.
+    pub oid: ObjectId,
+    /// 7-character short hex prefix.
+    pub short_oid: String,
+    /// Optional tag annotation message.
+    pub message: Option<String>,
+}
+
+/// Represents an entry in the reflog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflogItem {
+    /// Reflog index (0 is most recent).
+    pub index: usize,
+    /// Selector string e.g. "HEAD@{0}".
+    pub selector: String,
+    /// Target commit OID.
+    pub oid: ObjectId,
+    /// 7-character short hex prefix.
+    pub short_oid: String,
+    /// Action category e.g. "commit", "checkout".
+    pub action: String,
+    /// Full action message.
+    pub message: String,
+}
+
 /// Floating modal dialog states for interactive user input.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ActiveModal {
@@ -290,10 +428,24 @@ pub enum ActiveModal {
         /// Cursor character position.
         cursor: usize,
     },
+    /// Amend commit message prompt.
+    CommitAmend {
+        /// Entered message text.
+        message: String,
+        /// Cursor character position.
+        cursor: usize,
+    },
     /// New branch name prompt.
     BranchCreate {
         /// Entered branch name.
         name: String,
+        /// Cursor character position.
+        cursor: usize,
+    },
+    /// Stash message prompt.
+    StashSave {
+        /// Entered message text.
+        message: String,
         /// Cursor character position.
         cursor: usize,
     },

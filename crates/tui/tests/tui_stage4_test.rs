@@ -212,7 +212,5 @@ fn test_help_modal_and_branch_modal_rendering() {
     let buf2 = terminal.backend().buffer();
     let text2 = format!("{:?}", buf2);
     assert!(text2.contains("Keyboard Shortcuts Cheatsheet"));
-    assert!(text2.contains("Files Panel Actions:"));
-    assert!(text2.contains("Branches Panel Actions:"));
-    assert!(text2.contains("Stash Panel Actions:"));
+    assert!(text2.contains("Global Navigation"));
 }

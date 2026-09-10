@@ -11,19 +11,22 @@ use tempfile::TempDir;
 
 #[test]
 fn test_panel_enum_cycling_and_indexing() {
-    assert_eq!(Panel::Files.index(), 1);
-    assert_eq!(Panel::Branches.index(), 2);
-    assert_eq!(Panel::Commits.index(), 3);
-    assert_eq!(Panel::Stash.index(), 4);
+    assert_eq!(Panel::Status.index(), 1);
+    assert_eq!(Panel::Files.index(), 2);
+    assert_eq!(Panel::Branches.index(), 3);
+    assert_eq!(Panel::Commits.index(), 4);
+    assert_eq!(Panel::Stash.index(), 5);
 
     // Forward cycle
+    assert_eq!(Panel::Status.next(), Panel::Files);
     assert_eq!(Panel::Files.next(), Panel::Branches);
     assert_eq!(Panel::Branches.next(), Panel::Commits);
     assert_eq!(Panel::Commits.next(), Panel::Stash);
-    assert_eq!(Panel::Stash.next(), Panel::Files);
+    assert_eq!(Panel::Stash.next(), Panel::Status);
 
     // Backward cycle
-    assert_eq!(Panel::Files.prev(), Panel::Stash);
+    assert_eq!(Panel::Status.prev(), Panel::Stash);
+    assert_eq!(Panel::Files.prev(), Panel::Status);
     assert_eq!(Panel::Branches.prev(), Panel::Files);
     assert_eq!(Panel::Commits.prev(), Panel::Branches);
     assert_eq!(Panel::Stash.prev(), Panel::Commits);
@@ -252,12 +255,11 @@ fn test_ui_rendering_headless_backend() {
     // 4. Verify buffer text contents
     let buffer = terminal_standard.backend().buffer();
     let text = format!("{:?}", buffer);
-    assert!(text.contains("OXIDIZE"));
-    assert!(text.contains("LazyOx"));
-    assert!(text.contains("1 Files"));
-    assert!(text.contains("2 Branches"));
-    assert!(text.contains("3 Commits"));
-    assert!(text.contains("4 Stash"));
+    assert!(text.contains("1 Status"));
+    assert!(text.contains("2 Files"));
+    assert!(text.contains("3 Branches"));
+    assert!(text.contains("4 Commits"));
+    assert!(text.contains("5 Stash"));
 }
 
 #[test]

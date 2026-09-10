@@ -1,6 +1,9 @@
 //! Ratatui-based visual dashboard for commit graph, status, and diff viewer (LazyOx).
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+    MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -35,8 +38,9 @@ pub mod ui;
 
 pub use app::App;
 pub use model::{
-    ActiveModal, BranchItem, CommitItem, DiffLine, DiffLineKind, DiffView, FileItem,
-    FileStatusKind, Panel, StashItem, TabMode,
+    ActiveModal, BranchItem, BranchesTab, CommitItem, CommitsTab, DiffLine, DiffLineKind, DiffView,
+    FileItem, FileStatusKind, FocusedWindow, Panel, ReflogItem, RemoteItem, StashItem, TabMode,
+    TagItem,
 };
 
 /// Runs the interactive terminal UI dashboard.
@@ -46,7 +50,7 @@ pub fn run_tui(git_dir: &Path) -> Result<(), TuiError> {
 
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen)?;
+    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
 
@@ -54,7 +58,11 @@ pub fn run_tui(git_dir: &Path) -> Result<(), TuiError> {
 
     // Always restore terminal state
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     res
@@ -68,160 +76,329 @@ fn run_loop<B: ratatui::backend::Backend>(
         terminal.draw(|f| ui::render(f, app))?;
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                // Ignore key release events if terminal sends them
-                if key.kind == crossterm::event::KeyEventKind::Release {
-                    continue;
-                }
-
-                // If modal is open, forward keyboard events to modal
-                if app.active_modal != ActiveModal::None {
-                    match key.code {
-                        KeyCode::Esc => {
-                            app.close_modal();
-                        }
-                        KeyCode::Enter => {
-                            let _ = app.submit_modal();
-                        }
-                        KeyCode::Backspace => {
-                            app.handle_modal_backspace();
-                        }
-                        KeyCode::Left => {
-                            app.handle_modal_left();
-                        }
-                        KeyCode::Right => {
-                            app.handle_modal_right();
-                        }
-                        KeyCode::Char(c) => {
-                            app.handle_modal_char(c);
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                match key.code {
-                    // Quit
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        app.should_quit = true;
+            match event::read()? {
+                Event::Key(key) => {
+                    // Ignore key release events if terminal sends them
+                    if key.kind == crossterm::event::KeyEventKind::Release {
+                        continue;
                     }
 
-                    // Direct panel selection 1-4
-                    KeyCode::Char('1') => {
-                        app.select_panel(Panel::Files);
-                    }
-                    KeyCode::Char('2') => {
-                        app.select_panel(Panel::Branches);
-                    }
-                    KeyCode::Char('3') => {
-                        app.select_panel(Panel::Commits);
-                    }
-                    KeyCode::Char('4') => {
-                        app.select_panel(Panel::Stash);
-                    }
-
-                    // Panel cycling
-                    KeyCode::Tab | KeyCode::Char(']') => {
-                        app.next_panel();
-                    }
-                    KeyCode::BackTab | KeyCode::Char('[') => {
-                        app.prev_panel();
-                    }
-
-                    // Item navigation within focused panel
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        app.next_item();
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        app.prev_item();
-                    }
-
-                    // Inspector scrolling
-                    KeyCode::PageDown | KeyCode::Char('J') => {
-                        app.scroll_inspector_down(5);
-                    }
-                    KeyCode::PageUp | KeyCode::Char('K') => {
-                        app.scroll_inspector_up(5);
-                    }
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.scroll_inspector_down(10);
-                    }
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.scroll_inspector_up(10);
-                    }
-
-                    // Selection actions
-                    KeyCode::Char(' ') => match app.active_panel {
-                        Panel::Files => {
-                            let _ = app.toggle_stage_selected();
-                        }
-                        Panel::Branches => {
-                            let _ = app.checkout_selected_branch();
-                        }
-                        Panel::Stash => {
-                            let _ = app.pop_selected_stash();
-                        }
-                        _ => {}
-                    },
-                    KeyCode::Enter => match app.active_panel {
-                        Panel::Branches => {
-                            let _ = app.checkout_selected_branch();
-                        }
-                        Panel::Stash => {
-                            let _ = app.pop_selected_stash();
-                        }
-                        _ => {}
-                    },
-
-                    // Commit staged changes
-                    KeyCode::Char('c') => {
-                        if app.active_panel == Panel::Files {
-                            app.open_commit_modal();
-                        }
-                    }
-
-                    // Stage / Unstage all
-                    KeyCode::Char('a') => {
-                        if app.active_panel == Panel::Files {
-                            let _ = app.stage_all();
-                        }
-                    }
-
-                    // Create new branch
-                    KeyCode::Char('n') => {
-                        if app.active_panel == Panel::Branches {
-                            app.open_create_branch_modal();
-                        }
-                    }
-
-                    // Discard / Delete / Drop
-                    KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        match app.active_panel {
-                            Panel::Files => {
-                                let _ = app.discard_selected_file();
+                    // If modal is open, forward keyboard events to modal
+                    if app.active_modal != ActiveModal::None {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.close_modal();
                             }
-                            Panel::Branches => {
-                                let _ = app.delete_selected_branch();
+                            KeyCode::Enter => {
+                                let _ = app.submit_modal();
                             }
-                            Panel::Stash => {
-                                let _ = app.drop_selected_stash();
+                            KeyCode::Backspace => {
+                                app.handle_modal_backspace();
+                            }
+                            KeyCode::Left => {
+                                app.handle_modal_left();
+                            }
+                            KeyCode::Right => {
+                                app.handle_modal_right();
+                            }
+                            KeyCode::Char(c) => {
+                                if app.active_modal == ActiveModal::Help && (c == 'q' || c == '?') {
+                                    app.close_modal();
+                                } else {
+                                    app.handle_modal_char(c);
+                                }
                             }
                             _ => {}
                         }
+                        continue;
                     }
 
-                    // Keybindings Help Cheatsheet
-                    KeyCode::Char('?') => {
-                        app.active_modal = ActiveModal::Help;
+                    // If inspector window is focused, route navigation keys directly to inspector scrolling
+                    if app.focused_window == FocusedWindow::Inspector {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left => {
+                                app.focus_sidebar();
+                            }
+                            KeyCode::Char('q') => {
+                                app.should_quit = true;
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                app.scroll_inspector_down(1);
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                app.scroll_inspector_up(1);
+                            }
+                            KeyCode::PageDown | KeyCode::Char(' ') | KeyCode::Char('J') => {
+                                app.scroll_inspector_down(15);
+                            }
+                            KeyCode::PageUp | KeyCode::Char('K') => {
+                                app.scroll_inspector_up(15);
+                            }
+                            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.scroll_inspector_down(15);
+                            }
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.scroll_inspector_up(15);
+                            }
+                            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.scroll_inspector_down(25);
+                            }
+                            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                app.scroll_inspector_up(25);
+                            }
+                            KeyCode::Char('g') | KeyCode::Home => {
+                                app.scroll_inspector_top();
+                            }
+                            KeyCode::Char('G') | KeyCode::End => {
+                                app.scroll_inspector_bottom();
+                            }
+                            KeyCode::Char('?') => {
+                                app.active_modal = ActiveModal::Help;
+                            }
+                            KeyCode::Tab => {
+                                app.focus_sidebar();
+                                app.next_panel();
+                            }
+                            KeyCode::BackTab => {
+                                app.focus_sidebar();
+                                app.prev_panel();
+                            }
+                            _ => {}
+                        }
+                        continue;
                     }
 
-                    // Refresh
-                    KeyCode::Char('r') => {
-                        let _ = app.refresh();
-                    }
+                    // FocusedWindow is Sidebar:
+                    match key.code {
+                        // Quit
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            app.should_quit = true;
+                        }
 
-                    _ => {}
+                        // Direct panel selection 1-5 (LazyGit layout: 1: Status, 2: Files, 3: Branches, 4: Commits, 5: Stash)
+                        KeyCode::Char('1') => {
+                            app.focus_sidebar();
+                            app.select_panel(Panel::Status);
+                        }
+                        KeyCode::Char('2') => {
+                            app.focus_sidebar();
+                            app.select_panel(Panel::Files);
+                        }
+                        KeyCode::Char('3') => {
+                            app.focus_sidebar();
+                            app.select_panel(Panel::Branches);
+                        }
+                        KeyCode::Char('4') => {
+                            app.focus_sidebar();
+                            app.select_panel(Panel::Commits);
+                        }
+                        KeyCode::Char('5') => {
+                            app.focus_sidebar();
+                            app.select_panel(Panel::Stash);
+                        }
+
+                        // Window navigation: Vim h/l and Left/Right
+                        KeyCode::Char('h') | KeyCode::Left => {
+                            app.focus_sidebar();
+                        }
+                        KeyCode::Char('l') | KeyCode::Right => {
+                            app.focus_inspector();
+                        }
+
+                        // Panel cycling: Tab / BackTab
+                        KeyCode::Tab => {
+                            app.next_panel();
+                        }
+                        KeyCode::BackTab => {
+                            app.prev_panel();
+                        }
+
+                        // Sub-tab switching: [ and ]
+                        KeyCode::Char(']') => {
+                            app.next_tab();
+                        }
+                        KeyCode::Char('[') => {
+                            app.prev_tab();
+                        }
+
+                        // Direct inspector scrolling with Ctrl/Alt modifier from sidebar
+                        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.scroll_inspector_down(3);
+                        }
+                        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.scroll_inspector_up(3);
+                        }
+
+                        // Item navigation within focused sidebar panel
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            app.next_item();
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            app.prev_item();
+                        }
+
+                        // Inspector scrolling directly from sidebar
+                        KeyCode::PageDown => {
+                            app.scroll_inspector_down(15);
+                        }
+                        KeyCode::PageUp => {
+                            app.scroll_inspector_up(15);
+                        }
+                        KeyCode::Char('J') => {
+                            app.scroll_inspector_down(5);
+                        }
+                        KeyCode::Char('K') => {
+                            app.scroll_inspector_up(5);
+                        }
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.scroll_inspector_down(15);
+                        }
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.scroll_inspector_up(15);
+                        }
+                        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.scroll_inspector_down(25);
+                        }
+                        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.scroll_inspector_up(25);
+                        }
+
+                        // Selection actions
+                        KeyCode::Char(' ') => match app.active_panel {
+                            Panel::Files => {
+                                let _ = app.toggle_stage_selected();
+                            }
+                            Panel::Branches => {
+                                let _ = app.checkout_selected_branch();
+                            }
+                            Panel::Stash => {
+                                let _ = app.pop_selected_stash();
+                            }
+                            _ => {}
+                        },
+                        KeyCode::Enter => match app.active_panel {
+                            Panel::Files => {
+                                app.focus_inspector();
+                            }
+                            Panel::Branches => {
+                                if app.branches_tab == BranchesTab::Local {
+                                    let _ = app.checkout_selected_branch();
+                                } else {
+                                    app.focus_inspector();
+                                }
+                            }
+                            Panel::Commits => {
+                                app.focus_inspector();
+                            }
+                            Panel::Stash => {
+                                let _ = app.pop_selected_stash();
+                            }
+                            Panel::Status => {
+                                app.focus_inspector();
+                            }
+                        },
+
+                        // Commit staged changes
+                        KeyCode::Char('c') => {
+                            if app.active_panel == Panel::Files {
+                                app.open_commit_modal();
+                            }
+                        }
+
+                        // Amend commit
+                        KeyCode::Char('A') => {
+                            if app.active_panel == Panel::Files || app.active_panel == Panel::Commits {
+                                app.open_amend_modal();
+                            }
+                        }
+
+                        // Stash save modal
+                        KeyCode::Char('s') => {
+                            if app.active_panel == Panel::Files || app.active_panel == Panel::Stash {
+                                app.open_stash_save_modal();
+                            }
+                        }
+
+                        // Stage / Unstage all (in Files) OR Stash apply (in Stash)
+                        KeyCode::Char('a') => {
+                            match app.active_panel {
+                                Panel::Files => {
+                                    let _ = app.stage_all();
+                                }
+                                Panel::Stash => {
+                                    let _ = app.apply_selected_stash();
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // Create new branch
+                        KeyCode::Char('n') => {
+                            if app.active_panel == Panel::Branches {
+                                app.open_create_branch_modal();
+                            }
+                        }
+
+                        // Discard / Delete / Drop
+                        KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            match app.active_panel {
+                                Panel::Files => {
+                                    let _ = app.discard_selected_file();
+                                }
+                                Panel::Branches => {
+                                    let _ = app.delete_selected_branch();
+                                }
+                                Panel::Stash => {
+                                    let _ = app.drop_selected_stash();
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // Push commits to remote (LazyGit convention: 'P')
+                        KeyCode::Char('P') => {
+                            let _ = app.push();
+                        }
+
+                        // Pull commits from remote (LazyGit convention: 'p')
+                        KeyCode::Char('p') => {
+                            let _ = app.pull();
+                        }
+
+                        // Keybindings Help Cheatsheet
+                        KeyCode::Char('?') => {
+                            app.active_modal = ActiveModal::Help;
+                        }
+
+                        // Refresh
+                        KeyCode::Char('r') => {
+                            let _ = app.refresh();
+                        }
+
+                        _ => {}
+                    }
                 }
+                Event::Mouse(mouse) => {
+                    match mouse.kind {
+                        MouseEventKind::ScrollDown => {
+                            app.scroll_inspector_down(3);
+                        }
+                        MouseEventKind::ScrollUp => {
+                            app.scroll_inspector_up(3);
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let size = terminal.size().unwrap_or_default();
+                            let sidebar_width = size.width.saturating_mul(40) / 100;
+                            if mouse.column >= sidebar_width {
+                                app.focus_inspector();
+                            } else {
+                                app.focus_sidebar();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         }
 

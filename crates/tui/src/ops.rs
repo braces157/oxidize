@@ -1,5 +1,4 @@
-//! Working tree and Git staging operations for interactive actions.
-
+use crate::model::{ReflogItem, RemoteItem, TagItem};
 use crate::TuiError;
 use oxidize_config::GitConfig;
 use oxidize_core::id::ObjectId;
@@ -360,4 +359,302 @@ pub fn drop_stash(git_dir: &Path) -> Result<(), TuiError> {
         let _ = fs::remove_file(stash_log);
     }
     Ok(())
+}
+
+/// Reads configured remote repositories from `.git/config`.
+pub fn read_remotes(git_dir: &Path) -> Vec<RemoteItem> {
+    let mut remotes = Vec::new();
+    let config_path = git_dir.join("config");
+    if let Ok(content) = fs::read_to_string(&config_path) {
+        let mut current_remote: Option<String> = None;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with("[remote \"") && line.ends_with("\"]") {
+                let name = &line[9..line.len() - 2];
+                current_remote = Some(name.to_string());
+            } else if line.starts_with('[') {
+                current_remote = None;
+            } else if let Some(ref name) = current_remote {
+                if let Some(eq) = line.find('=') {
+                    let key = line[..eq].trim();
+                    let val = line[eq + 1..].trim();
+                    if key.eq_ignore_ascii_case("url") {
+                        remotes.push(RemoteItem {
+                            name: name.clone(),
+                            url: val.to_string(),
+                        });
+                        current_remote = None;
+                    }
+                }
+            }
+        }
+    }
+    remotes
+}
+
+/// Reads local tags from `.git/refs/tags/` and `.git/packed-refs`.
+pub fn read_tags(git_dir: &Path) -> Vec<TagItem> {
+    let mut tags = Vec::new();
+    let tags_dir = git_dir.join("refs").join("tags");
+    if tags_dir.exists() && tags_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(tags_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        let trimmed = content.trim();
+                        if let Ok(oid) = trimmed.parse::<ObjectId>() {
+                            let short_oid = if trimmed.len() >= 7 {
+                                trimmed[..7].to_string()
+                            } else {
+                                trimmed.to_string()
+                            };
+                            tags.push(TagItem {
+                                name,
+                                oid,
+                                short_oid,
+                                message: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check packed-refs
+    let packed_path = git_dir.join("packed-refs");
+    if packed_path.exists() {
+        if let Ok(content) = fs::read_to_string(packed_path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.starts_with('#') || line.starts_with('^') || line.is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 && parts[1].starts_with("refs/tags/") {
+                    let tag_name = parts[1].trim_start_matches("refs/tags/").to_string();
+                    if !tags.iter().any(|t| t.name == tag_name) {
+                        if let Ok(oid) = parts[0].parse::<ObjectId>() {
+                            let short_oid = parts[0][..7.min(parts[0].len())].to_string();
+                            tags.push(TagItem {
+                                name: tag_name,
+                                oid,
+                                short_oid,
+                                message: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    tags.sort_by(|a, b| a.name.cmp(&b.name));
+    tags
+}
+
+/// Reads reflog history from `.git/logs/HEAD`.
+pub fn read_reflog(git_dir: &Path) -> Vec<ReflogItem> {
+    let mut entries = Vec::new();
+    let reflog_path = git_dir.join("logs").join("HEAD");
+    if let Ok(content) = fs::read_to_string(reflog_path) {
+        let lines: Vec<&str> = content.lines().collect();
+        for (idx, line) in lines.iter().rev().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(tab_idx) = line.find('\t') {
+                let meta_part = &line[..tab_idx];
+                let msg_part = &line[tab_idx + 1..];
+                let meta_tokens: Vec<&str> = meta_part.split_whitespace().collect();
+                if meta_tokens.len() >= 2 {
+                    let new_sha = meta_tokens[1];
+                    if let Ok(oid) = new_sha.parse::<ObjectId>() {
+                        let short_oid = if new_sha.len() >= 7 {
+                            new_sha[..7].to_string()
+                        } else {
+                            new_sha.to_string()
+                        };
+
+                        let (action, msg) = if let Some(colon) = msg_part.find(':') {
+                            (
+                                msg_part[..colon].trim().to_string(),
+                                msg_part[colon + 1..].trim().to_string(),
+                            )
+                        } else {
+                            ("action".to_string(), msg_part.trim().to_string())
+                        };
+
+                        entries.push(ReflogItem {
+                            index: idx,
+                            selector: format!("HEAD@{{{}}}", idx),
+                            oid,
+                            short_oid,
+                            action,
+                            message: msg,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    entries
+}
+
+/// Amends current HEAD commit with new message and currently staged index.
+pub fn amend_commit(
+    _repo_root: &Path,
+    git_dir: &Path,
+    message: &str,
+) -> Result<ObjectId, TuiError> {
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let repo_store = RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
+    let ref_store = RefStore::new(git_dir);
+    let index_path = git_dir.join("index");
+    let index = Index::load_from(&index_path).map_err(|e| TuiError::Terminal(e.to_string()))?;
+
+    let (branch_name, head_commit_oid) = ref_store
+        .resolve_head()
+        .map_err(|e| TuiError::Terminal(e.to_string()))?;
+
+    let head_oid = head_commit_oid.ok_or_else(|| {
+        TuiError::Terminal("cannot amend: repository has no commits".to_string())
+    })?;
+
+    let head_commit = match repo_store.read_object(&head_oid) {
+        Ok(Object::Commit(c)) => c,
+        _ => return Err(TuiError::Terminal("HEAD is not a commit".to_string())),
+    };
+
+    let tree_oid = write_tree(&index, &store).map_err(|e| TuiError::Terminal(e.to_string()))?;
+    let sig = get_signature(git_dir);
+
+    let commit = Commit {
+        tree: tree_oid,
+        parents: head_commit.parents,
+        author: head_commit.author,
+        committer: sig,
+        gpg_sig: None,
+        message: format!("{}\n", message.trim()),
+    };
+
+    let commit_oid = store
+        .write_object(&Object::Commit(commit))
+        .map_err(|e| TuiError::Terminal(e.to_string()))?;
+
+    let first_line = message.lines().next().unwrap_or("").trim();
+    let ref_msg = format!("commit (amend): {}", first_line);
+    ref_store
+        .update_ref(&branch_name, &commit_oid, Some(&head_oid), &ref_msg)
+        .map_err(|e| TuiError::Terminal(e.to_string()))?;
+
+    Ok(commit_oid)
+}
+
+/// Applies a stash commit without dropping it from the stash stack.
+pub fn apply_stash(
+    repo_root: &Path,
+    git_dir: &Path,
+    stash_oid: &ObjectId,
+) -> Result<(), TuiError> {
+    let store = RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
+    let stash_commit = match store.read_object(stash_oid) {
+        Ok(Object::Commit(c)) => c,
+        _ => return Err(TuiError::Terminal("stash is not a commit".to_string())),
+    };
+
+    checkout_tree_and_update_index(repo_root, git_dir, &stash_commit.tree)
+}
+
+/// Creates a new stash commit saving working directory changes and index state.
+pub fn stash_save(
+    repo_root: &Path,
+    git_dir: &Path,
+    message: &str,
+) -> Result<ObjectId, TuiError> {
+    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let ref_store = RefStore::new(git_dir);
+    let index_path = git_dir.join("index");
+    let mut index = Index::load_from(&index_path).map_err(|e| TuiError::Terminal(e.to_string()))?;
+
+    // Stage all modified files into temporary index for the stash
+    for entry in &mut index.entries {
+        let full_path = repo_root.join(&entry.path);
+        if full_path.exists() && full_path.is_file() {
+            if let Ok(data) = fs::read(&full_path) {
+                if let Ok(meta) = fs::metadata(&full_path) {
+                    let blob = Object::Blob(Blob::new(data));
+                    if let Ok(oid) = store.write_object(&blob) {
+                        *entry = IndexEntry::from_fs_metadata(entry.path.clone(), oid, &meta, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    let tree_oid = write_tree(&index, &store).map_err(|e| TuiError::Terminal(e.to_string()))?;
+    let (branch_name, head_commit_oid) = ref_store
+        .resolve_head()
+        .map_err(|e| TuiError::Terminal(e.to_string()))?;
+
+    let parents = if let Some(p) = head_commit_oid {
+        vec![p]
+    } else {
+        Vec::new()
+    };
+
+    let sig = get_signature(git_dir);
+    let stash_msg = if message.trim().is_empty() {
+        format!(
+            "WIP on {}: {}",
+            branch_name,
+            head_commit_oid
+                .map(|o| o.to_string()[..7].to_string())
+                .unwrap_or_default()
+        )
+    } else {
+        message.trim().to_string()
+    };
+
+    let commit = Commit {
+        tree: tree_oid,
+        parents,
+        author: sig.clone(),
+        committer: sig,
+        gpg_sig: None,
+        message: format!("{}\n", stash_msg),
+    };
+
+    let stash_oid = store
+        .write_object(&Object::Commit(commit))
+        .map_err(|e| TuiError::Terminal(e.to_string()))?;
+
+    // Update .git/refs/stash
+    let stash_ref = git_dir.join("refs").join("stash");
+    if let Some(parent) = stash_ref.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&stash_ref, format!("{}\n", stash_oid))?;
+
+    // Append to .git/logs/refs/stash
+    let stash_log = git_dir.join("logs").join("refs").join("stash");
+    if let Some(parent) = stash_log.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stash_log)?;
+    let old_sha = "0000000000000000000000000000000000000000";
+    writeln!(
+        file,
+        "{} {} Oxidize <user@oxidize.dev> 0 +0000\t{}",
+        old_sha, stash_oid, stash_msg
+    )?;
+
+    Ok(stash_oid)
 }
