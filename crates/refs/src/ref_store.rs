@@ -4,7 +4,7 @@ use crate::signature::get_default_signature;
 use crate::RefError;
 use oxidize_core::id::ObjectId;
 use oxidize_core::object::{Object, Signature};
-use oxidize_core::store::LooseObjectStore;
+use oxidize_core::store::ObjectReader;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -282,7 +282,7 @@ impl RefStore {
     }
 
     /// Resolves a revision specifier (`HEAD`, `HEAD~2`, branch name, short/full SHA) to an `ObjectId`.
-    pub fn resolve_rev(&self, rev: &str, store: &LooseObjectStore) -> Result<ObjectId, RefError> {
+    pub fn resolve_rev(&self, rev: &str, store: &impl ObjectReader) -> Result<ObjectId, RefError> {
         let rev = rev.trim();
 
         // Check for parent / ancestor navigation like `HEAD~1` or `HEAD^`
@@ -316,7 +316,7 @@ impl RefStore {
             return Ok(oid);
         }
 
-        // Try loose object prefix
+        // Try object prefix
         if let Ok(oid) = store.find_by_prefix(rev) {
             return Ok(oid);
         }
@@ -331,7 +331,7 @@ impl RefStore {
         &self,
         start: ObjectId,
         n: usize,
-        store: &LooseObjectStore,
+        store: &impl ObjectReader,
     ) -> Result<ObjectId, RefError> {
         let mut curr = start;
         for _ in 0..n {
@@ -344,7 +344,7 @@ impl RefStore {
         &self,
         oid: ObjectId,
         parent_num: usize,
-        store: &LooseObjectStore,
+        store: &impl ObjectReader,
     ) -> Result<ObjectId, RefError> {
         let obj = store.read_object(&oid)?;
         let commit = match obj {
@@ -439,7 +439,7 @@ impl RefStore {
     /// Finds the Lowest Common Ancestor (merge base) between two commits.
     pub fn find_merge_base(
         &self,
-        store: &LooseObjectStore,
+        store: &impl ObjectReader,
         commit_a: &ObjectId,
         commit_b: &ObjectId,
     ) -> Result<Option<ObjectId>, RefError> {

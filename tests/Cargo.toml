@@ -45,6 +45,10 @@ path = "performance_benchmark_test.rs"
 name = "scope_boundaries_test"
 path = "scope_boundaries_test.rs"
 
+[[test]]
+name = "new_features_test"
+path = "new_features_test.rs"
+
 [dev-dependencies]
 oxidize-core.workspace = true
 oxidize-index.workspace = true

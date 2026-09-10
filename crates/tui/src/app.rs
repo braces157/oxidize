@@ -3,8 +3,8 @@
 use crate::TuiError;
 use oxidize_core::id::ObjectId;
 use oxidize_core::object::Object;
-use oxidize_core::store::LooseObjectStore;
-use oxidize_index::{compute_status, Index};
+use oxidize_index::{compute_status, Index, StagedChange, UnstagedChange};
+use oxidize_pack::RepoObjectStore;
 use oxidize_refs::RefStore;
 use std::path::Path;
 
@@ -73,7 +73,8 @@ impl App {
 
     /// Loads repository commits and status from disk.
     pub fn load_repository(&mut self, git_dir: &Path) -> Result<(), TuiError> {
-        let store = LooseObjectStore::new(git_dir.join("objects"));
+        let store =
+            RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
         let ref_store = RefStore::new(git_dir);
 
         let (branch, head_oid_opt) = ref_store
@@ -90,11 +91,14 @@ impl App {
             while let Some(oid) = queue.pop_front() {
                 if let Ok(Object::Commit(commit)) = store.read_object(&oid) {
                     let first_line = commit.message.lines().next().unwrap_or("").to_string();
+                    let date_str = chrono::DateTime::from_timestamp(commit.author.time_seconds, 0)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| commit.author.time_seconds.to_string());
                     self.commits.push(CommitItem {
                         oid,
                         short_oid: oid.to_string()[..7].to_string(),
                         author: commit.author.name.clone(),
-                        date: format!("{}", commit.author.time_seconds),
+                        date: date_str,
                         summary: first_line,
                         full_message: commit.message.clone(),
                         parents: commit.parents.clone(),
@@ -126,13 +130,33 @@ impl App {
                     self.status_lines
                         .push("Changes to be committed:".to_string());
                     for change in &status.staged {
-                        self.status_lines.push(format!("  {:?}", change));
+                        match change {
+                            StagedChange::New(p) => {
+                                self.status_lines.push(format!("  new file:   {}", p))
+                            }
+                            StagedChange::Modified(p) => {
+                                self.status_lines.push(format!("  modified:   {}", p))
+                            }
+                            StagedChange::Deleted(p) => {
+                                self.status_lines.push(format!("  deleted:    {}", p))
+                            }
+                            StagedChange::Renamed { from, to } => self
+                                .status_lines
+                                .push(format!("  renamed:    {} -> {}", from, to)),
+                        }
                     }
                 }
                 if !status.unstaged.is_empty() {
                     self.status_lines.push("Changes not staged:".to_string());
                     for change in &status.unstaged {
-                        self.status_lines.push(format!("  {:?}", change));
+                        match change {
+                            UnstagedChange::Modified(p) => {
+                                self.status_lines.push(format!("  modified:   {}", p))
+                            }
+                            UnstagedChange::Deleted(p) => {
+                                self.status_lines.push(format!("  deleted:    {}", p))
+                            }
+                        }
                     }
                 }
                 if !status.untracked.is_empty() {

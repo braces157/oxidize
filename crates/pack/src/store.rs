@@ -241,6 +241,10 @@ impl oxidize_core::ObjectReader for RepoObjectStore {
     fn read_object(&self, id: &ObjectId) -> Result<Object, CoreError> {
         self.read_object(id)
     }
+
+    fn find_by_prefix(&self, prefix: &str) -> Result<ObjectId, CoreError> {
+        self.find_by_prefix(prefix)
+    }
 }
 
 impl RepoObjectStore {

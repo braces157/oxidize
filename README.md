@@ -290,10 +290,13 @@ ox rm [-r] [-f] [--cached] <files>  # Remove files from working tree and/or inde
 ox mv <source> <dest>               # Move or rename a file, directory, or symlink
 ox restore [--staged] <files...>    # Unstage files or restore working tree state
 ox diff [--staged]                  # View unstaged or staged unified diffs with hunks
+ox clean [-f] [-d] [-n]             # Clean untracked files and directories from worktree
+ox config [--global] <key> [value]  # Query or set repository / global configuration
 
 # --- Commits & History ---
 ox commit -m "message"              # Record changes with author identity & reflog
 ox commit -am "message"             # Automatically stage modified files and commit
+ox show [<object>]                  # Show commit details & unified diff against parent
 ox log [--oneline] [--graph] [-n N] # Display formatted commit history DAG
 ox log --tui                        # Launch interactive TUI commit explorer
 ox blame <file>                     # Line-by-line attribution across commit history
@@ -304,6 +307,7 @@ ox branch [-a] [-d|-D <name>]       # List, create, or delete branches
 ox checkout [-b <new>] <target>     # Switch branches or check out a commit
 ox switch [-c <new>] <branch>       # Modern Git branch switcher
 ox merge <branch-or-commit>         # 3-way line merge with automatic conflict markers
+ox merge-base <commit1> <commit2>   # Find lowest common ancestor between two commits
 ox reset [--soft|--mixed|--hard]    # Reset current HEAD to specified commit
 
 # --- Stash, Rebase & History Rewriting ---

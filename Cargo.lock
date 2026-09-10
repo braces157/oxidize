@@ -908,10 +908,12 @@ dependencies = [
 name = "oxidize-tui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "crossterm",
  "oxidize-core",
  "oxidize-diff",
  "oxidize-index",
+ "oxidize-pack",
  "oxidize-refs",
  "ratatui",
  "tempfile",

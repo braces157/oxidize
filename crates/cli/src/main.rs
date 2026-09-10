@@ -467,6 +467,60 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+
+    /// Remove untracked files from the working tree
+    Clean {
+        /// Force removal of untracked files
+        #[arg(short = 'f', long)]
+        force: bool,
+
+        /// Remove untracked directories in addition to untracked files
+        #[arg(short = 'd')]
+        directories: bool,
+
+        /// Don't actually remove anything, just show what would be done
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
+
+    /// Get and set repository or global options
+    Config {
+        /// Use global ~/.gitconfig file
+        #[arg(long)]
+        global: bool,
+
+        /// List all variables set in config file
+        #[arg(short = 'l', long)]
+        list: bool,
+
+        /// Get the value for a given key
+        #[arg(long)]
+        get: Option<String>,
+
+        /// Remove a setting
+        #[arg(long)]
+        unset: Option<String>,
+
+        /// Key name (e.g. user.name)
+        key: Option<String>,
+
+        /// Value to set
+        value: Option<String>,
+    },
+
+    /// Show various types of objects (commits, trees, blobs, tags)
+    Show {
+        /// Object to show (default: HEAD)
+        object: Option<String>,
+    },
+
+    /// Find as good common ancestors as possible for a merge
+    MergeBase {
+        /// First commit
+        commit1: String,
+        /// Second commit
+        commit2: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -718,9 +772,30 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "ox", &mut io::stdout());
         }
-        other => {
-            println!("Command {:?} dispatched (stubbed in current phase)", other);
-        }
+        Commands::ReadTree { tree_ish } => cmd_read_tree(tree_ish)?,
+        Commands::RevList { commit } => cmd_rev_list(commit)?,
+        Commands::SymbolicRef { name, target } => cmd_symbolic_ref(name, target)?,
+        Commands::UpdateRef {
+            ref_name,
+            new_value,
+            old_value,
+        } => cmd_update_ref(ref_name, new_value, old_value)?,
+        Commands::ShowRef { quiet } => cmd_show_ref(quiet)?,
+        Commands::Clean {
+            force,
+            directories,
+            dry_run,
+        } => cmd_clean(force, directories, dry_run)?,
+        Commands::Config {
+            global,
+            list,
+            get,
+            unset,
+            key,
+            value,
+        } => cmd_config(global, list, get, unset, key, value)?,
+        Commands::Show { object } => cmd_show(object)?,
+        Commands::MergeBase { commit1, commit2 } => cmd_merge_base(commit1, commit2)?,
     }
     Ok(())
 }
@@ -845,7 +920,7 @@ fn cmd_init(directory: Option<String>) -> Result<()> {
 
 fn cmd_ls_tree(recurse: bool, long: bool, tree_ish: String) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
-    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let store = RepoObjectStore::open(&git_dir)?;
     let oid = store.find_by_prefix(&tree_ish)?;
     let obj = store.read_object(&oid)?;
 
@@ -860,7 +935,7 @@ fn cmd_ls_tree(recurse: bool, long: bool, tree_ish: String) -> Result<()> {
 }
 
 fn print_tree_entries(
-    store: &LooseObjectStore,
+    store: &impl oxidize_core::ObjectReader,
     tree_oid: &ObjectId,
     prefix: &str,
     recurse: bool,
@@ -1497,7 +1572,7 @@ fn cmd_diff(staged: bool) -> Result<()> {
 
 fn cmd_rev_parse(verify: bool, args: Vec<String>) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
-    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let store = RepoObjectStore::open(&git_dir)?;
     let ref_store = RefStore::new(&git_dir);
 
     if verify && args.len() != 1 {
@@ -1509,6 +1584,414 @@ fn cmd_rev_parse(verify: bool, args: Vec<String>) -> Result<()> {
         println!("{}", oid);
     }
     Ok(())
+}
+
+fn cmd_rev_list(commit_str: String) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = RepoObjectStore::open(&git_dir)?;
+    let ref_store = RefStore::new(&git_dir);
+    let start_oid = ref_store.resolve_rev(&commit_str, &store)?;
+
+    let mut visited = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(start_oid);
+    visited.insert(start_oid);
+
+    while let Some(oid) = queue.pop_front() {
+        println!("{}", oid);
+        if let Ok(Object::Commit(commit)) = store.read_object(&oid) {
+            for parent in commit.parents {
+                if visited.insert(parent) {
+                    queue.push_back(parent);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_symbolic_ref(name: String, target: Option<String>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let ref_path = if name.starts_with("refs/") || name == "HEAD" {
+        git_dir.join(&name)
+    } else {
+        git_dir.join("refs").join(&name)
+    };
+
+    if let Some(new_target) = target {
+        if !new_target.starts_with("refs/") {
+            bail!("Refusing to point symbolic ref to non-ref: {}", new_target);
+        }
+        if let Some(parent) = ref_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&ref_path, format!("ref: {}\n", new_target))?;
+    } else {
+        if !ref_path.exists() {
+            bail!("fatal: ref {} is not a symbolic ref", name);
+        }
+        let content = std::fs::read_to_string(&ref_path)?;
+        let trimmed = content.trim();
+        if let Some(sym) = trimmed.strip_prefix("ref: ") {
+            println!("{}", sym);
+        } else {
+            bail!("fatal: ref {} is not a symbolic ref", name);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_update_ref(ref_name: String, new_value: String, old_value: Option<String>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = RepoObjectStore::open(&git_dir)?;
+    let ref_store = RefStore::new(&git_dir);
+
+    let new_oid = ref_store.resolve_rev(&new_value, &store)?;
+    let old_oid = if let Some(ref old_val) = old_value {
+        Some(ref_store.resolve_rev(old_val, &store)?)
+    } else {
+        None
+    };
+
+    ref_store.update_ref(&ref_name, &new_oid, old_oid.as_ref(), "update-ref")?;
+    Ok(())
+}
+
+fn cmd_show_ref(quiet: bool) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let mut refs = std::collections::BTreeMap::new();
+
+    // 1. Packed refs
+    let packed_path = git_dir.join("packed-refs");
+    if packed_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(packed_path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
+                    continue;
+                }
+                if let Some((sha, name)) = line.split_once(' ') {
+                    refs.insert(name.trim().to_string(), sha.trim().to_string());
+                }
+            }
+        }
+    }
+
+    // 2. Loose refs under .git/refs/
+    let refs_dir = git_dir.join("refs");
+    if refs_dir.is_dir() {
+        fn collect_loose_refs(
+            dir: &Path,
+            prefix: &str,
+            refs: &mut std::collections::BTreeMap<String, String>,
+        ) {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let ref_name = if prefix.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}/{}", prefix, name)
+                    };
+                    if path.is_dir() {
+                        collect_loose_refs(&path, &ref_name, refs);
+                    } else if path.is_file() {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            let sha = content.trim().to_string();
+                            if sha.len() == 40 {
+                                refs.insert(format!("refs/{}", ref_name), sha);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        collect_loose_refs(&refs_dir, "", &mut refs);
+    }
+
+    if refs.is_empty() {
+        bail!("fatal: no references found");
+    }
+
+    if !quiet {
+        for (name, sha) in refs {
+            println!("{} {}", sha, name);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_read_tree(tree_ish: String) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let repo_root = git_dir.parent().context("git_dir has no parent")?;
+    let store = RepoObjectStore::open(&git_dir)?;
+    let ref_store = RefStore::new(&git_dir);
+
+    let oid = ref_store.resolve_rev(&tree_ish, &store)?;
+    let obj = store.read_object(&oid)?;
+    let tree_oid = match obj {
+        Object::Tree(_) => oid,
+        Object::Commit(c) => c.tree,
+        _ => bail!("fatal: not a tree-ish: {}", tree_ish),
+    };
+
+    let flat = flatten_tree(&store, &tree_oid, "")?;
+    let mut index = Index::new();
+    for (path, (mode, oid)) in flat {
+        let full_path = repo_root.join(&path);
+        let entry = if let Ok(meta) = std::fs::metadata(&full_path) {
+            IndexEntry::from_fs_metadata(path, oid, &meta, 0)
+        } else {
+            IndexEntry::new(path, oid, mode.0)
+        };
+        index.add_entry(entry);
+    }
+
+    let index_path = git_dir.join("index");
+    index.write_to(&index_path)?;
+    Ok(())
+}
+
+fn cmd_clean(force: bool, directories: bool, dry_run: bool) -> Result<()> {
+    if !force && !dry_run {
+        bail!("fatal: clean.requireForce defaults to true and neither -i, -n, nor -f given; refusing to clean");
+    }
+
+    let git_dir = find_git_dir(Path::new("."))?;
+    let repo_root = git_dir.parent().context("git_dir has no parent")?;
+    let store = RepoObjectStore::open(&git_dir)?;
+    let ref_store = RefStore::new(&git_dir);
+    let index_path = git_dir.join("index");
+    let index = Index::load_from(&index_path)?;
+
+    let (_branch, head_oid_opt) = ref_store.resolve_head()?;
+    let head_tree_oid = match head_oid_opt {
+        Some(oid) => {
+            if let Object::Commit(commit) = store.read_object(&oid)? {
+                Some(commit.tree)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+
+    let gitignore = GitIgnore::load_from_dir(repo_root).unwrap_or_default();
+    let ignore_fn = |rel: &str, is_dir: bool| gitignore.is_ignored(rel, is_dir);
+
+    let status = compute_status_with_ignore(
+        repo_root,
+        &index,
+        head_tree_oid.as_ref(),
+        &store,
+        Some(&ignore_fn),
+    )?;
+
+    for file in &status.untracked {
+        let full_path = repo_root.join(file);
+        if full_path.is_file() {
+            if dry_run {
+                println!("Would remove {}", file);
+            } else {
+                std::fs::remove_file(&full_path)?;
+                println!("Removing {}", file);
+            }
+        } else if full_path.is_dir() && directories {
+            if dry_run {
+                println!("Would remove {}/", file);
+            } else {
+                std::fs::remove_dir_all(&full_path)?;
+                println!("Removing {}/", file);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_config(
+    global: bool,
+    list: bool,
+    get: Option<String>,
+    unset: Option<String>,
+    key: Option<String>,
+    value: Option<String>,
+) -> Result<()> {
+    let config_path = if global {
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+            .context("could not determine home directory")?;
+        home.join(".gitconfig")
+    } else {
+        let git_dir = find_git_dir(Path::new("."))?;
+        git_dir.join("config")
+    };
+
+    let mut config = if config_path.exists() {
+        GitConfig::load_from_file(&config_path)?
+    } else {
+        GitConfig::new()
+    };
+
+    if list {
+        for (k, v) in config.list_all() {
+            println!("{}={}", k, v);
+        }
+        return Ok(());
+    }
+
+    if let Some(ref target_key) = unset {
+        if config.unset_by_name(target_key) {
+            config.save_to_file(&config_path)?;
+        }
+        return Ok(());
+    }
+
+    if let Some(ref target_key) = get {
+        if let Some(val) = config.get_by_name(target_key) {
+            println!("{}", val);
+            return Ok(());
+        } else {
+            std::process::exit(1);
+        }
+    }
+
+    match (key, value) {
+        (Some(k), Some(v)) => {
+            config.set_by_name(&k, &v);
+            config.save_to_file(&config_path)?;
+        }
+        (Some(k), None) => {
+            if let Some(val) = config.get_by_name(&k) {
+                println!("{}", val);
+            } else {
+                std::process::exit(1);
+            }
+        }
+        (None, _) => {
+            bail!("fatal: no key specified");
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_show(object_ref: Option<String>) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = RepoObjectStore::open(&git_dir)?;
+    let ref_store = RefStore::new(&git_dir);
+
+    let target = object_ref.unwrap_or_else(|| "HEAD".to_string());
+    let oid = ref_store.resolve_rev(&target, &store)?;
+    let obj = store.read_object(&oid)?;
+
+    match obj {
+        Object::Commit(commit) => {
+            let ts = chrono::DateTime::from_timestamp(commit.author.time_seconds, 0)
+                .map(|dt| dt.to_rfc2822())
+                .unwrap_or_else(|| commit.author.time_seconds.to_string());
+
+            println!("commit {}", oid);
+            if commit.parents.len() > 1 {
+                print!("Merge:");
+                for p in &commit.parents {
+                    print!(" {}", &p.to_string()[..7]);
+                }
+                println!();
+            }
+            println!("Author: {} <{}>", commit.author.name, commit.author.email);
+            println!("Date:   {}", ts);
+            println!();
+            for line in commit.message.lines() {
+                println!("    {}", line);
+            }
+            println!();
+
+            let parent_map = if let Some(parent_oid) = commit.parents.first() {
+                if let Ok(Object::Commit(p_commit)) = store.read_object(parent_oid) {
+                    flatten_tree(&store, &p_commit.tree, "")?
+                } else {
+                    std::collections::BTreeMap::new()
+                }
+            } else {
+                std::collections::BTreeMap::new()
+            };
+
+            let current_map = flatten_tree(&store, &commit.tree, "")?;
+
+            for (path, (_mode, curr_blob_oid)) in &current_map {
+                let curr_data = match store.read_object(curr_blob_oid)? {
+                    Object::Blob(b) => String::from_utf8_lossy(&b.data).to_string(),
+                    _ => String::new(),
+                };
+
+                if let Some((_p_mode, p_blob_oid)) = parent_map.get(path) {
+                    if p_blob_oid != curr_blob_oid {
+                        let p_data = match store.read_object(p_blob_oid)? {
+                            Object::Blob(b) => String::from_utf8_lossy(&b.data).to_string(),
+                            _ => String::new(),
+                        };
+                        if let Some(diff) = format_unified_diff(path, path, &p_data, &curr_data, 3)
+                        {
+                            print!("{}", diff);
+                        }
+                    }
+                } else {
+                    if let Some(diff) = format_unified_diff(path, path, "", &curr_data, 3) {
+                        print!("{}", diff);
+                    }
+                }
+            }
+
+            for (path, (_p_mode, p_blob_oid)) in &parent_map {
+                if !current_map.contains_key(path) {
+                    let p_data = match store.read_object(p_blob_oid)? {
+                        Object::Blob(b) => String::from_utf8_lossy(&b.data).to_string(),
+                        _ => String::new(),
+                    };
+                    if let Some(diff) = format_unified_diff(path, path, &p_data, "", 3) {
+                        print!("{}", diff);
+                    }
+                }
+            }
+        }
+        Object::Blob(blob) => {
+            io::stdout().write_all(&blob.data)?;
+        }
+        Object::Tree(tree) => {
+            for entry in tree.entries {
+                println!(
+                    "{} {} {}\t{}",
+                    entry.mode.display_str(),
+                    entry.mode.object_type().as_str(),
+                    entry.id,
+                    entry.name
+                );
+            }
+        }
+        Object::Tag(_) => {
+            io::stdout().write_all(&obj.serialize_content())?;
+        }
+    }
+    Ok(())
+}
+
+fn cmd_merge_base(commit1: String, commit2: String) -> Result<()> {
+    let git_dir = find_git_dir(Path::new("."))?;
+    let store = RepoObjectStore::open(&git_dir)?;
+    let ref_store = RefStore::new(&git_dir);
+
+    let oid1 = ref_store.resolve_rev(&commit1, &store)?;
+    let oid2 = ref_store.resolve_rev(&commit2, &store)?;
+
+    if let Some(base) = ref_store.find_merge_base(&store, &oid1, &oid2)? {
+        println!("{}", base);
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
 }
 
 fn cmd_commit_tree(tree: String, parents: Vec<String>, message: String) -> Result<()> {
@@ -1683,7 +2166,7 @@ fn cmd_switch(create: Option<String>, branch: Option<String>) -> Result<()> {
 fn cmd_merge(commit_arg: String) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
     let repo_root = git_dir.parent().context("git_dir has no parent")?;
-    let store = LooseObjectStore::new(git_dir.join("objects"));
+    let store = RepoObjectStore::open(&git_dir)?;
     let ref_store = RefStore::new(&git_dir);
     let index_path = git_dir.join("index");
     let mut index = Index::load_from(&index_path)?;
@@ -1791,7 +2274,7 @@ fn cmd_merge(commit_arg: String) -> Result<()> {
         println!("Automatic merge failed; fix conflicts and then commit the result.");
     } else {
         // Automatic merge commit
-        let tree_oid = write_tree(&index, &store)?;
+        let tree_oid = write_tree(&index, store.loose())?;
         let sig = get_default_signature(Some(&git_dir));
         let merge_commit = Commit {
             tree: tree_oid,
@@ -3070,10 +3553,10 @@ fn cmd_rebase(upstream_arg: String) -> Result<()> {
 
     let (active_branch, head_oid_opt) = ref_store.resolve_head()?;
     let head_oid = head_oid_opt.context("cannot rebase: HEAD has no commits")?;
-    let upstream_oid = ref_store.resolve_rev(&upstream_arg, store.loose())?;
+    let upstream_oid = ref_store.resolve_rev(&upstream_arg, &store)?;
 
     let merge_base = ref_store
-        .find_merge_base(store.loose(), &head_oid, &upstream_oid)?
+        .find_merge_base(&store, &head_oid, &upstream_oid)?
         .context("no common ancestor found between HEAD and upstream")?;
 
     if merge_base == head_oid {

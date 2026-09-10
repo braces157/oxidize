@@ -20,11 +20,27 @@ pub struct LooseObjectStore {
 pub trait ObjectReader {
     /// Reads and deserializes a Git object by ID.
     fn read_object(&self, id: &ObjectId) -> Result<Object, CoreError>;
+
+    /// Resolves an object by prefix.
+    fn find_by_prefix(&self, prefix: &str) -> Result<ObjectId, CoreError> {
+        if prefix.len() == 40 {
+            if let Ok(oid) = prefix.parse::<ObjectId>() {
+                if self.read_object(&oid).is_ok() {
+                    return Ok(oid);
+                }
+            }
+        }
+        Err(CoreError::ObjectNotFound(prefix.to_string()))
+    }
 }
 
 impl ObjectReader for LooseObjectStore {
     fn read_object(&self, id: &ObjectId) -> Result<Object, CoreError> {
         self.read_object(id)
+    }
+
+    fn find_by_prefix(&self, prefix: &str) -> Result<ObjectId, CoreError> {
+        self.find_by_prefix(prefix)
     }
 }
 

@@ -149,6 +149,90 @@ impl GitConfig {
         self.get("remote", Some(name), "url")
     }
 
+    /// Retrieves a value by its full dot-separated key (e.g. "user.name" or "remote.origin.url").
+    pub fn get_by_name(&self, full_key: &str) -> Option<&str> {
+        let first_dot = full_key.find('.')?;
+        let last_dot = full_key.rfind('.')?;
+        if first_dot == last_dot {
+            let section = &full_key[..first_dot];
+            let key = &full_key[first_dot + 1..];
+            self.get(section, None, key)
+        } else {
+            let section = &full_key[..first_dot];
+            let subsection = &full_key[first_dot + 1..last_dot];
+            let key = &full_key[last_dot + 1..];
+            self.get(section, Some(subsection), key)
+        }
+    }
+
+    /// Sets a value by its full dot-separated key (e.g. "user.name" or "remote.origin.url").
+    pub fn set_by_name(&mut self, full_key: &str, value: &str) -> bool {
+        if let Some(first_dot) = full_key.find('.') {
+            let last_dot = full_key.rfind('.').unwrap();
+            if first_dot == last_dot {
+                let section = &full_key[..first_dot];
+                let key = &full_key[first_dot + 1..];
+                self.set(section, None, key, value);
+                true
+            } else {
+                let section = &full_key[..first_dot];
+                let subsection = &full_key[first_dot + 1..last_dot];
+                let key = &full_key[last_dot + 1..];
+                self.set(section, Some(subsection), key, value);
+                true
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Unsets a key by its full dot-separated key (e.g. "user.name" or "remote.origin.url").
+    pub fn unset_by_name(&mut self, full_key: &str) -> bool {
+        if let Some(first_dot) = full_key.find('.') {
+            let last_dot = full_key.rfind('.').unwrap();
+            let (section, subsection, key) = if first_dot == last_dot {
+                (&full_key[..first_dot], None, &full_key[first_dot + 1..])
+            } else {
+                (
+                    &full_key[..first_dot],
+                    Some(&full_key[first_dot + 1..last_dot]),
+                    &full_key[last_dot + 1..],
+                )
+            };
+            let sec_key = ConfigSectionKey {
+                section: section.to_lowercase(),
+                subsection: subsection.map(|s| s.to_string()),
+            };
+            if let Some(entries) = self.sections.get_mut(&sec_key) {
+                let removed = entries.remove(&key.to_lowercase()).is_some();
+                if entries.is_empty() {
+                    self.sections.remove(&sec_key);
+                }
+                removed
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Lists all configuration entries as `(full_key, value)` sorted lexicographically.
+    pub fn list_all(&self) -> Vec<(String, String)> {
+        let mut list = Vec::new();
+        for (sec_key, entries) in &self.sections {
+            for (k, v) in entries {
+                let full_name = if let Some(ref sub) = sec_key.subsection {
+                    format!("{}.{}.{}", sec_key.section, sub, k)
+                } else {
+                    format!("{}.{}", sec_key.section, k)
+                };
+                list.push((full_name, v.clone()));
+            }
+        }
+        list
+    }
+
     /// Configures a remote with the specified URL and standard fetch refspec.
     pub fn add_remote(&mut self, name: &str, url: &str) {
         let normalized_url = url.replace('\\', "/");
@@ -263,5 +347,27 @@ mod tests {
         let aliases = config.get_aliases();
         assert_eq!(aliases.len(), 3);
         assert_eq!(aliases.get("ci").map(|s| s.as_str()), Some("commit"));
+    }
+
+    #[test]
+    fn test_git_config_dot_notation_helpers() {
+        let mut config = GitConfig::new();
+        config.set_by_name("user.name", "Jane Doe");
+        config.set_by_name("user.email", "jane@example.com");
+        config.set_by_name("remote.origin.url", "https://github.com/test/repo.git");
+
+        assert_eq!(config.get_by_name("user.name"), Some("Jane Doe"));
+        assert_eq!(config.get_by_name("user.email"), Some("jane@example.com"));
+        assert_eq!(
+            config.get_by_name("remote.origin.url"),
+            Some("https://github.com/test/repo.git")
+        );
+
+        let all = config.list_all();
+        assert_eq!(all.len(), 3);
+
+        assert!(config.unset_by_name("user.email"));
+        assert_eq!(config.get_by_name("user.email"), None);
+        assert_eq!(config.list_all().len(), 2);
     }
 }

@@ -73,6 +73,16 @@ ox log [-n <number>] [--oneline] [--graph] [<revision-range>]
 - `--oneline`: Compact output with 7-character abbreviated hash and commit subject.
 - `--graph`: Draws ASCII DAG commit branch visualization.
 
+### `ox show`
+Show various types of objects (commits, trees, blobs, tags).
+```bash
+ox show [<object>]
+```
+- For commits: displays commit metadata and the unified patch/diff against the parent commit.
+- For trees: displays tree entry listings with permissions and OIDs.
+- For blobs: prints raw file contents.
+- For tags: displays annotated tag details.
+
 ### `ox branch` (alias: `ox br`)
 List, create, or delete branches.
 ```bash
@@ -117,8 +127,23 @@ ox reset [--soft | --mixed | --hard] [<commit>]
 ### `ox clean`
 Remove untracked files from working tree.
 ```bash
-ox clean [-f | --force] [-d]
+ox clean [-f | --force] [-d] [-n | --dry-run]
 ```
+- `-f, --force`: Required to confirm file deletion.
+- `-d`: Remove untracked directories in addition to untracked files.
+- `-n, --dry-run`: Don't actually remove anything, just show what would be done.
+
+### `ox config`
+Get and set repository or global options.
+```bash
+ox config [--global] [--list] [--get <key>] [--unset <key>] [<key>] [<value>]
+```
+- `--global`: Read or write to user global configuration (`~/.gitconfig`).
+- `-l, --list`: List all configured settings as `key=value`.
+- `--get <key>`: Query the value of a specific setting (e.g. `user.name`).
+- `--unset <key>`: Remove a configuration key.
+- `<key> <value>`: Set a configuration setting.
+
 
 ### `ox reflog`
 Manage and inspect reflog information.
@@ -203,3 +228,42 @@ ox fsck [--full]
 ```
 - Scans all loose objects, packfiles, and index entries.
 - Detects dangling commits, dangling blobs, and SHA-1 corruption.
+
+### `ox rev-list`
+Lists commit objects in reverse chronological order along the commit history DAG.
+```bash
+ox rev-list <commit>
+```
+
+### `ox symbolic-ref`
+Read, modify and delete symbolic refs.
+```bash
+ox symbolic-ref <name> [<target>]
+```
+- `ox symbolic-ref HEAD`: Output current branch reference (e.g. `refs/heads/master`).
+- `ox symbolic-ref HEAD <target>`: Atomically redirect symbolic reference.
+
+### `ox update-ref`
+Update the object name stored in a ref safely.
+```bash
+ox update-ref <ref_name> <new_val> [<old_val>]
+```
+
+### `ox show-ref`
+List references in a local repository and their SHA-1 hashes.
+```bash
+ox show-ref [-q | --quiet]
+```
+
+### `ox read-tree`
+Reads tree information into the index staging cache.
+```bash
+ox read-tree <tree-ish>
+```
+
+### `ox merge-base`
+Find the lowest common ancestor (merge base) between two commits.
+```bash
+ox merge-base <commit1> <commit2>
+```
+

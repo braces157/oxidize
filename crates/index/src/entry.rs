@@ -39,6 +39,26 @@ pub struct IndexEntry {
 }
 
 impl IndexEntry {
+    /// Creates a default `IndexEntry` for a given path, object ID, and mode.
+    pub fn new(path: String, oid: ObjectId, mode: u32) -> Self {
+        Self {
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            dev: 0,
+            ino: 0,
+            mode,
+            uid: 0,
+            gid: 0,
+            file_size: 0,
+            oid,
+            stage: 0,
+            assume_valid: false,
+            path,
+        }
+    }
+
     /// Creates a new `IndexEntry` from filesystem metadata and blob `ObjectId`.
     pub fn from_fs_metadata(
         path: String,
