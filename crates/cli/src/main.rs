@@ -540,6 +540,25 @@ enum Commands {
         /// Second commit
         commit2: String,
     },
+
+    /// Format Rust source code files across the repository or check formatting
+    #[command(alias = "format")]
+    Fmt {
+        /// Check formatting without overwriting files (exits with non-zero if unformatted)
+        #[arg(long)]
+        check: bool,
+
+        /// Format only staged files in git
+        #[arg(long)]
+        staged: bool,
+
+        /// Install a Git pre-commit hook to automatically verify formatting before committing
+        #[arg(long)]
+        install_hook: bool,
+
+        /// Specific files or directories to format (defaults to workspace)
+        files: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -838,8 +857,159 @@ fn dispatch_command(cmd: Commands) -> Result<()> {
         } => cmd_config(global, list, get, unset, key, value)?,
         Commands::Show { object } => cmd_show(object)?,
         Commands::MergeBase { commit1, commit2 } => cmd_merge_base(commit1, commit2)?,
+        Commands::Fmt {
+            check,
+            staged,
+            install_hook,
+            files,
+        } => cmd_fmt(check, staged, install_hook, files)?,
     }
     Ok(())
+}
+
+fn cmd_fmt(check: bool, staged: bool, install_hook: bool, files: Vec<String>) -> Result<()> {
+    if install_hook {
+        let git_dir = find_git_dir(Path::new("."))
+            .context("fatal: not a git repository (or any of the parent directories): .git")?;
+        let hooks_dir = git_dir.join("hooks");
+        std::fs::create_dir_all(&hooks_dir)?;
+        let hook_path = hooks_dir.join("pre-commit");
+        let hook_content = "#!/bin/sh\n# Oxidize pre-commit code formatting check\nox fmt --check --staged || {\n    echo \"Error: Staged files have formatting issues. Run 'ox fmt --staged' to fix.\"\n    exit 1\n}\n";
+        std::fs::write(&hook_path, hook_content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&hook_path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&hook_path, perms)?;
+        }
+        println!("✓ Pre-commit hook installed to {}", hook_path.display());
+        return Ok(());
+    }
+
+    if staged {
+        let git_dir = find_git_dir(Path::new("."))
+            .context("fatal: not a git repository (or any of the parent directories): .git")?;
+        let worktree = git_dir.parent().unwrap_or(&git_dir);
+        let index_path = git_dir.join("index");
+        let index = Index::load_from(&index_path).unwrap_or_default();
+        let store = RepoObjectStore::open(&git_dir)?;
+        let ref_store = RefStore::new(&git_dir);
+        let head_oid_opt = ref_store.resolve_head().ok().and_then(|(_, oid)| oid);
+        let head_tree = head_oid_opt.and_then(|oid| {
+            if let Ok(Object::Commit(c)) = store.read_object(&oid) {
+                Some(c.tree)
+            } else {
+                None
+            }
+        });
+        let gitignore = GitIgnore::load_from_dir(worktree).unwrap_or_default();
+        let status = compute_status_with_ignore(
+            worktree,
+            &index,
+            head_tree.as_ref(),
+            &store,
+            Some(&|p, is_dir| gitignore.is_ignored(p, is_dir)),
+        )?;
+        let mut staged_files = Vec::new();
+        for change in status.staged {
+            let path = match change {
+                StagedChange::New(p)
+                | StagedChange::Modified(p)
+                | StagedChange::Renamed { to: p, .. } => p,
+                StagedChange::Deleted(_) => continue,
+            };
+            if path.ends_with(".rs") {
+                staged_files.push(worktree.join(path).to_string_lossy().to_string());
+            }
+        }
+        if staged_files.is_empty() {
+            println!("No staged Rust files to format.");
+            return Ok(());
+        }
+        return format_files(&staged_files, check);
+    }
+
+    if !files.is_empty() {
+        return format_files(&files, check);
+    }
+
+    // Default: format entire workspace with cargo fmt or rustfmt
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("fmt");
+    cmd.arg("--all");
+    if check {
+        cmd.args(["--", "--check"]);
+    }
+    match cmd.status() {
+        Ok(status) => {
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+            if check {
+                println!("✓ Code formatting check passed.");
+            } else {
+                println!("✓ Workspace code formatted.");
+            }
+        }
+        Err(_) => {
+            let mut rust_files = Vec::new();
+            collect_rust_files(Path::new("."), &mut rust_files);
+            if rust_files.is_empty() {
+                println!("No Rust files found to format.");
+                return Ok(());
+            }
+            format_files(&rust_files, check)?;
+        }
+    }
+    Ok(())
+}
+
+fn format_files(files: &[String], check: bool) -> Result<()> {
+    let mut failed = false;
+    for file in files {
+        let mut cmd = std::process::Command::new("rustfmt");
+        if check {
+            cmd.arg("--check");
+        }
+        cmd.arg(file);
+        match cmd.status() {
+            Ok(status) => {
+                if !status.success() {
+                    failed = true;
+                }
+            }
+            Err(e) => {
+                bail!("failed to execute rustfmt on '{}': {}", file, e);
+            }
+        }
+    }
+    if failed {
+        std::process::exit(1);
+    }
+    if check {
+        println!("✓ Formatting check passed for {} file(s).", files.len());
+    } else {
+        println!("✓ Formatted {} file(s).", files.len());
+    }
+    Ok(())
+}
+
+fn collect_rust_files(dir: &Path, out: &mut Vec<String>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "target" || name == ".git" {
+                continue;
+            }
+            if path.is_dir() {
+                collect_rust_files(&path, out);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                out.push(path.to_string_lossy().to_string());
+            }
+        }
+    }
 }
 
 fn cmd_hash_object(

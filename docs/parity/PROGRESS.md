@@ -1,0 +1,88 @@
+# Oxidize Lazygit Progress Log
+
+## 2026-09-11
+- Established fresh build and test baseline on workspace:
+  - `cargo build -p ox --locked` succeeded.
+  - `cargo test --workspace --locked` passed (156 passed, 0 failed across all crates and integration tests).
+- Created persistent project tracking system in `docs/parity/`:
+  - `REFERENCE.md`: Lazygit v0.65.0 pinned reference specifications.
+  - `FEATURE_MATRIX.md`: Complete 128-item target backlog.
+  - `PLAN.md`: Milestone roadmap.
+  - `DECISIONS.md`: Architecture and safety decisions.
+  - `CHECKPOINT.md`: Real-time session state.
+  - `BLOCKERS.md`: Known blockers ledger.
+  - `TEST_MATRIX.md`: Test suites and journey mappings.
+- Completed Milestone 1 / Packet 0 (Interaction and Safety Blockers):
+  - Fixed syntax highlighter infinite loop on `$` across Shell, JS/TS, PHP, GraphQL; added invariant progress assurance and multiline fallback.
+  - Implemented `ActiveModal::Confirm` for destructive workflows (discard file, delete branch, drop stash) with target identification and consequence warning.
+  - Aligned mouse and keyboard action preconditions, error handling, and confirmation modals.
+  - Isolated branch checkout and deletion to `BranchesTab::Local`; protected against accidental mutation on Remotes and Tags.
+  - Added repository-wide mutation lock (`ensure_no_active_job`) blocking staging, checkout, commit, stash while background jobs are active.
+  - Fixed footer width calculations using Unicode character widths, preventing button coordinate desynchronization.
+  - Added explicit stash conflict outcome detection and status reporting.
+  - Implemented draft message preservation on recoverable commit failure.
+  - Added new integration suite `crates/tui/tests/tui_packet0_test.rs` (8 tests, all passing).
+  - All 164 workspace tests passing, 0 failed, 0 clippy warnings.
+- Completed Milestone 2 / Packet 1 & 2 (Shared Native Services, Repository Truth, Structured Patch Engine):
+  - Added `commondir` resolution to `RepoContext::discover`, `RepoObjectStore`, and `RefStore`, accurately separating worktree-local vs shared state across linked worktrees.
+  - Implemented atomic packed-ref branch deletion in `RefStore::delete_branch_atomic`, rewriting `packed-refs` via `LockFile` to prevent resurrection.
+  - Configured upstream ahead/behind resolution using `.git/config` branch tracking (`branch.<name>.remote` & `merge`).
+  - Created byte-truthful structured patch engine in `oxidize_diff::patch`: `ExactLine`, `StructuredHunk`, `compute_structured_diff`, with CRLF and trailing newline preservation.
+  - Implemented batch staging and unstage transactions (`stage_paths`, `unstage_paths`), recursive directory staging, and single-hunk stage/unstage/discard.
+  - Extended TUI inspector with hunk counter badge (`[Hunk X/Y - STAGED/UNSTAGED]`), visual active hunk header styling, keyboard navigation (`[`, `]`, `Space`, `d`), mouse clicks, and footer buttons.
+  - Added `crates/tui/tests/tui_packet1_packet2_test.rs` with 8 comprehensive integration tests.
+  - All 172 workspace tests passing, 0 failed, 0 clippy warnings.
+- Completed Milestone 3 / Packet 3 (Commit Graph DAG, Tree Diff Optimization, Virtualization & Workflows):
+  - RefStore refactoring: Added `rename_branch`, `create_tag`, `delete_tag` with packed-refs atomic update.
+  - Multi-root DAG traversal: Implemented topological commit sorting with committer timestamp max-heap, dynamic lane allocation, and visual connection prefixes (`*`, `| *`, `|/`).
+  - Commit decorations: Injected `(HEAD -> branch, origin/branch, tag: v1.0)` decorations alongside commit summaries.
+  - Tree-diff fast-path: `compute_commit_diff` bypasses unchanged file diffing via direct `(mode, oid)` tree comparisons, caching diffs in `commit_diff_cache` by immutable commit OID.
+  - Inspector virtualization: Visible diff lines rendered via slice window `[start_idx..end_idx]` with scroll 0, completely avoiding Ratatui's `u16` line truncation on massive diffs (>65,535 lines).
+  - Branch and commit workflows:
+    - Interactive branch rename (`R`) modal with `.git/config` branch tracking updates.
+    - Native fast-forward merge (`f` / `M`).
+    - Native three-way merge cherry-pick (`c`) with committer signature.
+    - Native Git Reset modal (`g` mixed, `G` hard, soft) moving HEAD and updating working tree/index.
+    - Live commit search/filtering (`/`) modal with live DAG filtering.
+    - Tag creation (`n`) and deletion (`d`).
+  - Added integration test suite `crates/tui/tests/tui_packet3_test.rs` (10 tests, 100% passing).
+  - All 182 workspace tests passing, 0 failed, 0 clippy warnings.
+- Completed Milestone 4 / Packet 4 (Native Replay Sequencer, Interactive Rebase Todo Editor, Three-Way Conflict Resolution, Commit Revert):
+  - Added sequencer state machine (`tui::sequencer`) with full `.git/rebase-merge/` persistence.
+  - Rebase Todo Editor modal (`ActiveModal::RebaseTodo`) supporting reordering (`J`/`K`) and action cycling.
+  - Native rebase execution: `Pick`, `Reword`, `Edit`, `Squash`, `Fixup`, and `Drop`.
+  - Three-way conflict markers, real index conflict stages (1, 2, 3), and shortcuts (`o`, `t`, `b`).
+  - Integration test suite `crates/tui/tests/tui_packet4_test.rs` (9 tests, 100% passing).
+- Completed Milestone 5 / Packet 5 (Custom Patches Basket, Stash Variants, Stash Branching, Linked Worktrees):
+  - Custom patch basket (`oxidize_diff::patch::CustomPatchBasket`) with unified diff export, apply to worktree/index, and commit creation.
+  - Advanced stash variants: 3-parent untracked stash, staged-only stash, keep-index, stash branching.
+  - Linked worktree management: listing, creation, switching, and deletion safeguards.
+  - Integration test suite `crates/tui/tests/tui_packet5_test.rs` (8 tests, 100% passing).
+- Completed Milestone 6 / Packet 6 (Native Remote Networking, Submodule Status & Navigation, Git Bisect, Command Palette):
+  - Native remote management (add, rename, remove).
+  - Force-with-lease push with upstream tracking OID validation; remote branch deletion.
+  - Submodule discovery (`.gitmodules`), init, update, and navigation stack (`enter_submodule` / `return_to_parent_repo`).
+  - Git bisect state machine with candidate calculation and culprit detection.
+  - Searchable command palette modal (`ActiveModal::CommandPalette`, `Ctrl+P`).
+  - Web provider permalinks (`O`) and item yanking (`y`).
+  - Integration test suite `crates/tui/tests/tui_packet6_test.rs` (7 tests, 100% passing).
+- Completed Parity Review Defect Remediation (R01–R12) & Cross-Cutting Architectural Hardening:
+  - Fixed R01: Preflight dirty worktree/index before interactive rebase force checkout; persist sequencer state before mutation.
+  - Fixed R02: Enforce reciprocal worktree metadata checks and reject removing dirty/unlocked linked worktrees.
+  - Fixed R03: Validate 3rd-parent untracked files against worktree before restoring stash; retain stash on failure.
+  - Fixed R04: Fix slice index bounds check (`len >= image.len()`) in `apply_hunk_forward` and `apply_hunk_reverse`.
+  - Fixed R05: Binary-safe tree replay merging preserving raw bytes in conflict stages 1, 2, and 3 without lossy UTF-8 conversion.
+  - Fixed R06: Derive rebase todo candidate commits strictly by walking parent edges from HEAD down to base OID.
+  - Fixed R07: Stage hunk deletion removes index entry when worktree file is absent and post-image is empty.
+  - Fixed R08: Stage hunk validates worktree file snapshot against hunk context before staging to index.
+  - Fixed R09: Conflicted fixup/squash/reword continue amends prior commit rather than generating duplicate commits.
+  - Fixed R10: Corrupt index file propagates error rather than falling back to empty repository state.
+  - Fixed R11: Tag deletion modal correctly targets selected tag name.
+  - Fixed R12: Force-with-lease push resolves expected remote OID from upstream tracking ref `refs/remotes/<remote>/<branch>`.
+  - Added Windows transactional `.lockbackup` commit in `LockFile` to prevent target destruction on rename failure.
+  - Added multi-path preflight in `apply_custom_patch_to_index` and explicit safe rejection of non-HEAD target commits in `apply_custom_patch_to_commit`.
+  - Added dirty worktree preflight in `submodule_update` to protect uncommitted submodule modifications.
+  - Permanent regression test suite `crates/tui/tests/parity_review_probes.rs` (15 tests, 100% passing).
+  - All workspace tests passing across all crates and targets.
+
+

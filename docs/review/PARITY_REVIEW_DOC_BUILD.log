@@ -1,0 +1,12 @@
+ Documenting oxidize-index v0.2.0 (C:\Users\PC\Documents\OXIDIZE\crates\index)
+ Documenting oxidize-config v0.2.0 (C:\Users\PC\Documents\OXIDIZE\crates\config)
+ Documenting oxidize-refs v0.2.0 (C:\Users\PC\Documents\OXIDIZE\crates\refs)
+ Documenting oxidize-pack v0.2.0 (C:\Users\PC\Documents\OXIDIZE\crates\pack)
+ Documenting oxidize-diff v0.2.0 (C:\Users\PC\Documents\OXIDIZE\crates\diff)
+ Documenting oxidize-core v0.2.0 (C:\Users\PC\Documents\OXIDIZE\crates\core)
+ Documenting oxidize-transport v0.2.0 (C:\Users\PC\Documents\OXIDIZE\crates\transport)
+    Checking oxidize-tui v0.2.0 (C:\Users\PC\Documents\OXIDIZE\crates\tui)
+ Documenting oxidize-tui v0.2.0 (C:\Users\PC\Documents\OXIDIZE\crates\tui)
+ Documenting ox v0.2.0 (C:\Users\PC\Documents\OXIDIZE\crates\cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.56s
+   Generated C:\Users\PC\Documents\OXIDIZE\target\doc\ox\index.html and 8 other files

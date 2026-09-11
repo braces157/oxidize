@@ -1,7 +1,7 @@
 //! Ratatui UI drawing functions and multi-panel layout rendering (LazyOx - authentic LazyGit replica).
 
 use crate::app::App;
-use crate::model::{ActiveModal, BranchesTab, CommitsTab, DiffLineKind, FocusedWindow, Panel};
+use crate::model::{ActiveModal, BranchesTab, CommitDecoration, CommitsTab, FocusedWindow, Panel};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -51,7 +51,7 @@ pub fn compute_layout(size: Rect) -> Option<AppLayout> {
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
+            Constraint::Length(6),
             Constraint::Percentage(35),
             Constraint::Percentage(24),
             Constraint::Percentage(26),
@@ -152,7 +152,7 @@ fn render_status_panel(frame: &mut Frame, app: &App, area: Rect) {
         )
     };
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("Repo:   ", Style::default().fg(Color::DarkGray)),
             Span::styled(
@@ -181,6 +181,40 @@ fn render_status_panel(frame: &mut Frame, app: &App, area: Rect) {
             status_desc,
         ]),
     ];
+
+    if let Some(ref s) = app.sequencer_state {
+        lines.push(Line::from(vec![
+            Span::styled("Rebase: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(
+                    "step {}/{} ({})",
+                    s.current_step,
+                    s.total_steps,
+                    s.status.as_str()
+                ),
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    if app.bisect_state.is_active {
+        let step_info = if app.bisect_state.remaining_steps > 0 {
+            format!(" (~{} steps left)", app.bisect_state.remaining_steps)
+        } else {
+            String::new()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Bisect: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("BISECTING{}", step_info),
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
@@ -540,27 +574,46 @@ fn render_commits_panel(frame: &mut Frame, app: &App, area: Rect) {
         tab_spans.push(Span::raw(" "));
     }
 
+    if let Some(ref query) = app.commit_search_filter {
+        tab_spans.push(Span::styled(
+            format!(" [/{}] ", query),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     let block = get_panel_border(app, Panel::Commits, Line::from(tab_spans));
 
     let avail_height = (area.height as usize).saturating_sub(2);
 
     let items: Vec<ListItem> = match app.commits_tab {
         CommitsTab::Commits => {
-            let (start_idx, end_idx) =
-                window_range(app.commits.len(), app.commits_selected, avail_height);
+            let indices = app.filtered_commit_indices();
+            let cur_pos = indices
+                .iter()
+                .position(|&i| i == app.commits_selected)
+                .unwrap_or(0);
+            let (start_idx, end_idx) = window_range(indices.len(), cur_pos, avail_height);
 
-            if app.commits.is_empty() {
-                vec![ListItem::new(Span::styled(
-                    "  (no commits in repository)",
-                    Style::default().fg(Color::DarkGray),
-                ))]
+            if indices.is_empty() {
+                if app.commit_search_filter.is_some() {
+                    vec![ListItem::new(Span::styled(
+                        "  (no commits matching filter)",
+                        Style::default().fg(Color::DarkGray),
+                    ))]
+                } else {
+                    vec![ListItem::new(Span::styled(
+                        "  (no commits in repository)",
+                        Style::default().fg(Color::DarkGray),
+                    ))]
+                }
             } else {
-                app.commits[start_idx..end_idx]
+                indices[start_idx..end_idx]
                     .iter()
-                    .enumerate()
-                    .map(|(offset, c)| {
-                        let actual_idx = start_idx + offset;
-                        let is_selected = actual_idx == app.commits_selected;
+                    .map(|&commit_idx| {
+                        let c = &app.commits[commit_idx];
+                        let is_selected = commit_idx == app.commits_selected;
                         let marker = if is_selected && is_focused {
                             "▶ "
                         } else if is_selected {
@@ -569,17 +622,29 @@ fn render_commits_panel(frame: &mut Frame, app: &App, area: Rect) {
                             "  "
                         };
 
-                        // Authentic LazyGit commit graph node
-                        let graph_node = "* ";
+                        let lane_color = match c.lane % 5 {
+                            0 => Color::Cyan,
+                            1 => Color::Yellow,
+                            2 => Color::Magenta,
+                            3 => Color::Blue,
+                            _ => Color::Red,
+                        };
 
-                        let line = Line::from(vec![
-                            Span::styled(marker, Style::default().fg(Color::Green)),
+                        let graph_span = if c.graph_prefix.is_empty() {
                             Span::styled(
-                                graph_node,
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
+                                "* ",
+                                Style::default().fg(lane_color).add_modifier(Modifier::BOLD),
+                            )
+                        } else {
+                            Span::styled(
+                                format!("{} ", c.graph_prefix),
+                                Style::default().fg(lane_color),
+                            )
+                        };
+
+                        let mut line_spans = vec![
+                            Span::styled(marker, Style::default().fg(Color::Green)),
+                            graph_span,
                             Span::styled(
                                 &c.short_oid,
                                 Style::default()
@@ -587,21 +652,83 @@ fn render_commits_panel(frame: &mut Frame, app: &App, area: Rect) {
                                     .add_modifier(Modifier::BOLD),
                             ),
                             Span::raw(" "),
-                            Span::styled(
-                                &c.summary,
-                                Style::default().fg(if is_selected {
-                                    Color::White
-                                } else {
-                                    Color::Gray
-                                }),
-                            ),
-                            Span::raw(" "),
-                            Span::styled(
-                                format!("({})", c.author),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                        ]);
+                        ];
 
+                        for deco in &c.decorations {
+                            match deco {
+                                CommitDecoration::Head(name) => {
+                                    line_spans.push(Span::styled(
+                                        format!("(HEAD -> {}) ", name),
+                                        Style::default()
+                                            .fg(Color::Green)
+                                            .add_modifier(Modifier::BOLD),
+                                    ));
+                                }
+                                CommitDecoration::Branch(name) => {
+                                    line_spans.push(Span::styled(
+                                        format!("({}) ", name),
+                                        Style::default()
+                                            .fg(Color::Cyan)
+                                            .add_modifier(Modifier::BOLD),
+                                    ));
+                                }
+                                CommitDecoration::Remote(name) => {
+                                    line_spans.push(Span::styled(
+                                        format!("({}) ", name),
+                                        Style::default().fg(Color::Red),
+                                    ));
+                                }
+                                CommitDecoration::Tag(name) => {
+                                    line_spans.push(Span::styled(
+                                        format!("(tag: {}) ", name),
+                                        Style::default()
+                                            .fg(Color::LightYellow)
+                                            .add_modifier(Modifier::BOLD),
+                                    ));
+                                }
+                            }
+                        }
+
+                        if app.bisect_state.is_active {
+                            if app.bisect_state.culprit_oid == Some(c.oid) {
+                                line_spans.push(Span::styled(
+                                    "(culprit) ",
+                                    Style::default()
+                                        .fg(Color::LightRed)
+                                        .add_modifier(Modifier::BOLD),
+                                ));
+                            } else if app.bisect_state.bad_oid == Some(c.oid) {
+                                line_spans.push(Span::styled(
+                                    "(bad) ",
+                                    Style::default()
+                                        .fg(Color::LightRed)
+                                        .add_modifier(Modifier::BOLD),
+                                ));
+                            } else if app.bisect_state.good_oids.contains(&c.oid) {
+                                line_spans.push(Span::styled(
+                                    "(good) ",
+                                    Style::default()
+                                        .fg(Color::LightGreen)
+                                        .add_modifier(Modifier::BOLD),
+                                ));
+                            }
+                        }
+
+                        line_spans.push(Span::styled(
+                            &c.summary,
+                            Style::default().fg(if is_selected {
+                                Color::White
+                            } else {
+                                Color::Gray
+                            }),
+                        ));
+                        line_spans.push(Span::raw(" "));
+                        line_spans.push(Span::styled(
+                            format!("({})", c.author),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+
+                        let line = Line::from(line_spans);
                         let item = ListItem::new(line);
                         if is_selected && is_focused {
                             item.style(Style::default().bg(Color::Rgb(25, 45, 35)))
@@ -762,16 +889,54 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
         .map(|d| d.title.clone())
         .unwrap_or_else(|| "Main".to_string());
 
-    let title_text = if is_inspector_focused {
-        format!(
-            " [ {} ] ── [ FOCUSED: j/k (or Mouse) Scroll │ PgDn/PgUp Page │ Esc/h Return ] ",
-            base_title
-        )
+    let has_hunks = app
+        .cached_diff
+        .as_ref()
+        .is_some_and(|d| !d.hunks.is_empty());
+
+    let basket_info = if !app.custom_patch_basket.is_empty() {
+        format!(" [🧺 Basket: {}] ", app.custom_patch_basket.len())
     } else {
-        format!(
-            " [ {} ] ── [ Enter/l to Focus & Scroll │ Mouse/PgDn to Scroll ] ",
-            base_title
-        )
+        String::new()
+    };
+
+    let hunk_info = if has_hunks {
+        if let Some(diff) = &app.cached_diff {
+            let total = diff.hunks.len();
+            let current = diff.selected_hunk.map(|i| i + 1).unwrap_or(0);
+            let stage_label = if diff.is_staged { "STAGED" } else { "UNSTAGED" };
+            format!(" [Hunk {}/{} - {}] ", current, total, stage_label)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let title_text = if is_inspector_focused {
+        if has_hunks {
+            format!(
+                " [ {} ]{}{}── [ [ / ] Hunk │ Space Stage │ a Basket │ P Patch Menu │ d Discard │ Esc/h Return ] ",
+                base_title, hunk_info, basket_info
+            )
+        } else {
+            format!(
+                " [ {} ]{}── [ FOCUSED: j/k (or Mouse) Scroll │ PgDn/PgUp Page │ Esc/h Return ] ",
+                base_title, basket_info
+            )
+        }
+    } else {
+        if has_hunks {
+            format!(
+                " [ {} ]{}{}── [ Enter/l Focus Hunks │ Space Toggle File ] ",
+                base_title, hunk_info, basket_info
+            )
+        } else {
+            format!(
+                " [ {} ]{}── [ Enter/l to Focus & Scroll │ Mouse/PgDn to Scroll ] ",
+                base_title, basket_info
+            )
+        }
     };
 
     let block = Block::default()
@@ -798,30 +963,80 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let lines: Vec<Line> = diff_view
-        .lines
+    let initial_lang = match app.active_panel {
+        Panel::Files => app
+            .selected_file()
+            .map(|f| crate::syntax::Language::from_path(&f.path))
+            .unwrap_or_else(|| crate::syntax::Language::from_title(&diff_view.title)),
+        _ => crate::syntax::Language::from_title(&diff_view.title),
+    };
+    let mut highlighter = crate::syntax::SyntaxHighlighter::new(initial_lang);
+    let selected_hunk_idx = diff_view.selected_hunk;
+
+    let avail_height = (area.height as usize).saturating_sub(2);
+    let total_lines = diff_view.lines.len();
+    let start_idx = app.inspector_scroll.min(total_lines);
+    let end_idx = (start_idx + avail_height).min(total_lines);
+
+    let lines: Vec<Line> = diff_view.lines[start_idx..end_idx]
         .iter()
-        .map(|dl| {
-            let style = match dl.kind {
-                DiffLineKind::Header => Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-                DiffLineKind::HunkHeader => Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-                DiffLineKind::Addition => Style::default().fg(Color::Green),
-                DiffLineKind::Deletion => Style::default().fg(Color::LightRed),
-                DiffLineKind::Context => Style::default().fg(Color::DarkGray),
-                DiffLineKind::Normal => Style::default().fg(Color::White),
+        .enumerate()
+        .map(|(offset, dl)| {
+            let line_idx = start_idx + offset;
+            let line_hunk = diff_view.hunk_at_line(line_idx);
+            let is_in_selected = line_hunk.is_some() && line_hunk == selected_hunk_idx;
+            let in_basket = if let (Some(path), Some(h_idx)) = (&diff_view.file_path, line_hunk) {
+                h_idx < diff_view.hunks.len()
+                    && app
+                        .custom_patch_basket
+                        .contains_hunk(path, &diff_view.hunks[h_idx])
+            } else {
+                false
             };
-            Line::from(Span::styled(&dl.content, style))
+            let basket_tag = if in_basket { " [IN BASKET]" } else { "" };
+            let line = highlighter.highlight_line(dl);
+
+            if is_in_selected && is_inspector_focused {
+                if dl.kind == crate::model::DiffLineKind::HunkHeader {
+                    Line::from(Span::styled(
+                        format!("▶ {} [ACTIVE HUNK]{}", dl.content.trim_end(), basket_tag),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .bg(Color::Rgb(30, 45, 65))
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                } else {
+                    let spans: Vec<Span<'static>> = line
+                        .spans
+                        .into_iter()
+                        .map(|s| {
+                            let mut style = s.style;
+                            style = style.bg(Color::Rgb(25, 35, 50));
+                            Span::styled(s.content, style)
+                        })
+                        .collect();
+                    Line::from(spans)
+                }
+            } else if dl.kind == crate::model::DiffLineKind::HunkHeader && in_basket {
+                Line::from(vec![
+                    Span::styled(
+                        dl.content.trim_end().to_string(),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(
+                        " [IN BASKET]".to_string(),
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            } else {
+                line
+            }
         })
         .collect();
 
-    let total_lines = lines.len();
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .scroll((app.inspector_scroll as u16, 0));
+    let paragraph = Paragraph::new(lines).block(block);
 
     frame.render_widget(paragraph, area);
 
@@ -837,9 +1052,10 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             100
         };
+        let lang_badge = highlighter.current_lang.name();
         let indicator = format!(
-            " [Line {}/{} - {}%] ",
-            current_line, total_lines, scroll_pct
+            " [{} │ Line {}/{} - {}%] ",
+            lang_badge, current_line, total_lines, scroll_pct
         );
         let ind_rect = Rect {
             x: area.x + area.width.saturating_sub(indicator.len() as u16 + 2),
@@ -892,39 +1108,60 @@ pub enum FooterAction {
     ScrollInspectorTop,
     ScrollInspectorBottom,
     PageInspectorDown,
+    PrevHunk,
+    NextHunk,
+    StageHunk,
+    DiscardHunk,
+    CheckoutCommit,
+    CherryPick,
+    ResetCommit,
+    RenameBranch,
+    FastForwardMerge,
+    CreateTag,
+    DeleteTag,
+    SearchFilter,
+    InteractiveRebase,
+    RebaseContinue,
+    RebaseSkip,
+    RebaseAbort,
+    RevertCommit,
+    ResolveOurs,
+    ResolveTheirs,
+    ResolveBoth,
+    AddToPatchBasket,
+    CustomPatchMenu,
+    StashBranch,
+    WorktreeList,
 }
 
 /// Builds footer text spans and computes clickable bounding columns for footer actions.
-pub fn build_footer(app: &App, _width: u16) -> (Line<'static>, Vec<(u16, u16, FooterAction)>) {
+pub fn build_footer(app: &App, _max_width: u16) -> (Line<'static>, Vec<(u16, u16, FooterAction)>) {
     let mut footer_spans = Vec::new();
     let mut buttons = Vec::new();
     let mut col_offset: u16 = 0;
 
     // Feedback message or default badge
-    if let Some(ref msg) = app.status_message {
-        let text = format!(" {} ", msg);
-        col_offset += text.len() as u16;
-        footer_spans.push(Span::styled(
-            text,
+    let badge_span = if let Some(ref msg) = app.status_message {
+        Span::styled(
+            format!(" {} ", msg),
             Style::default()
                 .fg(Color::Yellow)
                 .bg(Color::Rgb(40, 30, 20))
                 .add_modifier(Modifier::BOLD),
-        ));
-        footer_spans.push(Span::raw(" │ "));
-        col_offset += 3;
+        )
     } else {
-        let text = " [LazyOx] Ready ";
-        col_offset += text.len() as u16;
-        footer_spans.push(Span::styled(
-            text,
+        Span::styled(
+            " [LazyOx] Ready ".to_string(),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
-        ));
-        footer_spans.push(Span::raw(" │ "));
-        col_offset += 3;
-    }
+        )
+    };
+    let badge_width = badge_span.width() as u16;
+    col_offset += badge_width;
+    footer_spans.push(badge_span);
+    footer_spans.push(Span::raw(" │ "));
+    col_offset += 3;
 
     let push_btn = |key: &'static str,
                     key_style: Style,
@@ -934,14 +1171,18 @@ pub fn build_footer(app: &App, _width: u16) -> (Line<'static>, Vec<(u16, u16, Fo
                     spans: &mut Vec<Span<'static>>,
                     btns: &mut Vec<(u16, u16, FooterAction)>,
                     offset: &mut u16| {
+        let key_span = Span::styled(key, key_style);
+        let label_span = Span::styled(label, label_style);
+        let btn_width = (key_span.width() + label_span.width()) as u16;
+        let sep_width = 3; // " │ "
         let start_x = *offset;
-        spans.push(Span::styled(key, key_style));
-        spans.push(Span::styled(label, label_style));
-        let btn_len = (key.len() + label.len()) as u16;
-        *offset += btn_len;
-        btns.push((start_x, *offset, action));
+        let end_x = start_x + btn_width;
+        spans.push(key_span);
+        spans.push(label_span);
+        *offset = end_x;
+        btns.push((start_x, end_x, action));
         spans.push(Span::raw(" │ "));
-        *offset += 3;
+        *offset += sep_width;
     };
 
     let bold_green = Style::default()
@@ -962,6 +1203,88 @@ pub fn build_footer(app: &App, _width: u16) -> (Line<'static>, Vec<(u16, u16, Fo
     let raw = Style::default();
 
     if app.focused_window == FocusedWindow::Inspector {
+        if app.has_hunks() {
+            push_btn(
+                "[",
+                bold_cyan,
+                " Prev Hunk",
+                raw,
+                FooterAction::PrevHunk,
+                &mut footer_spans,
+                &mut buttons,
+                &mut col_offset,
+            );
+            push_btn(
+                "]",
+                bold_cyan,
+                " Next Hunk",
+                raw,
+                FooterAction::NextHunk,
+                &mut footer_spans,
+                &mut buttons,
+                &mut col_offset,
+            );
+            let stage_label = if app.cached_diff.as_ref().is_some_and(|d| d.is_staged) {
+                " Unstage Hunk"
+            } else {
+                " Stage Hunk"
+            };
+            push_btn(
+                "Space",
+                bold_yellow,
+                stage_label,
+                raw,
+                FooterAction::StageHunk,
+                &mut footer_spans,
+                &mut buttons,
+                &mut col_offset,
+            );
+            push_btn(
+                "d",
+                bold_red,
+                " Discard Hunk",
+                raw,
+                FooterAction::DiscardHunk,
+                &mut footer_spans,
+                &mut buttons,
+                &mut col_offset,
+            );
+            let in_basket = if let Some(diff) = &app.cached_diff {
+                if let (Some(path), Some(idx)) = (&diff.file_path, diff.selected_hunk) {
+                    if idx < diff.hunks.len() {
+                        app.custom_patch_basket
+                            .contains_hunk(path, &diff.hunks[idx])
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            let basket_label = if in_basket { " -Basket" } else { " +Basket" };
+            push_btn(
+                "a",
+                bold_cyan,
+                basket_label,
+                raw,
+                FooterAction::AddToPatchBasket,
+                &mut footer_spans,
+                &mut buttons,
+                &mut col_offset,
+            );
+            push_btn(
+                "P",
+                bold_cyan,
+                " Patch Menu",
+                raw,
+                FooterAction::CustomPatchMenu,
+                &mut footer_spans,
+                &mut buttons,
+                &mut col_offset,
+            );
+        }
         push_btn(
             "j/k",
             bold_green,
@@ -1045,6 +1368,38 @@ pub fn build_footer(app: &App, _width: u16) -> (Line<'static>, Vec<(u16, u16, Fo
                     &mut buttons,
                     &mut col_offset,
                 );
+                if app.sequencer_state.is_some() {
+                    push_btn(
+                        "m",
+                        bold_green,
+                        " Continue Rebase",
+                        raw,
+                        FooterAction::RebaseContinue,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "s",
+                        bold_yellow,
+                        " Skip",
+                        raw,
+                        FooterAction::RebaseSkip,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "a",
+                        bold_red,
+                        " Abort",
+                        raw,
+                        FooterAction::RebaseAbort,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                }
             }
             Panel::Files => {
                 push_btn(
@@ -1107,6 +1462,74 @@ pub fn build_footer(app: &App, _width: u16) -> (Line<'static>, Vec<(u16, u16, Fo
                     &mut buttons,
                     &mut col_offset,
                 );
+                if app
+                    .files
+                    .get(app.files_selected)
+                    .is_some_and(|f| f.kind == crate::model::FileStatusKind::Conflicted)
+                {
+                    push_btn(
+                        "o",
+                        bold_cyan,
+                        " Ours",
+                        raw,
+                        FooterAction::ResolveOurs,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "t",
+                        bold_yellow,
+                        " Theirs",
+                        raw,
+                        FooterAction::ResolveTheirs,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "b",
+                        bold_green,
+                        " Both",
+                        raw,
+                        FooterAction::ResolveBoth,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                }
+                if app.sequencer_state.is_some() {
+                    push_btn(
+                        "m",
+                        bold_green,
+                        " Continue Rebase",
+                        raw,
+                        FooterAction::RebaseContinue,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "s",
+                        bold_yellow,
+                        " Skip",
+                        raw,
+                        FooterAction::RebaseSkip,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "a",
+                        bold_red,
+                        " Abort",
+                        raw,
+                        FooterAction::RebaseAbort,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                }
                 push_btn(
                     "PgDn",
                     cyan,
@@ -1118,23 +1541,191 @@ pub fn build_footer(app: &App, _width: u16) -> (Line<'static>, Vec<(u16, u16, Fo
                     &mut col_offset,
                 );
             }
-            Panel::Branches => {
+            Panel::Branches => match app.branches_tab {
+                BranchesTab::Local => {
+                    push_btn(
+                        "Space/Enter",
+                        bold_yellow,
+                        " Checkout",
+                        raw,
+                        FooterAction::CheckoutBranch,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "R",
+                        cyan,
+                        " Rename",
+                        raw,
+                        FooterAction::RenameBranch,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "f/M",
+                        bold_yellow,
+                        " Fast-forward",
+                        raw,
+                        FooterAction::FastForwardMerge,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "n",
+                        green,
+                        " New",
+                        raw,
+                        FooterAction::NewBranch,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "d",
+                        bold_red,
+                        " Delete",
+                        raw,
+                        FooterAction::DeleteBranch,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "w",
+                        bold_cyan,
+                        " Worktrees",
+                        raw,
+                        FooterAction::WorktreeList,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "[/]",
+                        cyan,
+                        " Tabs",
+                        raw,
+                        FooterAction::SwitchTab,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                }
+                BranchesTab::Remotes => {
+                    push_btn(
+                        "f/M",
+                        bold_yellow,
+                        " Fast-forward",
+                        raw,
+                        FooterAction::FastForwardMerge,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "l",
+                        cyan,
+                        " Diff",
+                        raw,
+                        FooterAction::ScrollDiff,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "[/]",
+                        cyan,
+                        " Tabs",
+                        raw,
+                        FooterAction::SwitchTab,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                }
+                BranchesTab::Tags => {
+                    push_btn(
+                        "n",
+                        green,
+                        " New Tag",
+                        raw,
+                        FooterAction::CreateTag,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "d",
+                        bold_red,
+                        " Delete Tag",
+                        raw,
+                        FooterAction::DeleteTag,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                    push_btn(
+                        "[/]",
+                        cyan,
+                        " Tabs",
+                        raw,
+                        FooterAction::SwitchTab,
+                        &mut footer_spans,
+                        &mut buttons,
+                        &mut col_offset,
+                    );
+                }
+            },
+            Panel::Commits => {
                 push_btn(
-                    "Space/Enter",
+                    "Space",
                     bold_yellow,
                     " Checkout",
                     raw,
-                    FooterAction::CheckoutBranch,
+                    FooterAction::CheckoutCommit,
                     &mut footer_spans,
                     &mut buttons,
                     &mut col_offset,
                 );
                 push_btn(
-                    "l",
+                    "c",
                     cyan,
-                    " Diff",
+                    " Cherry-pick",
                     raw,
-                    FooterAction::ScrollDiff,
+                    FooterAction::CherryPick,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "i",
+                    bold_green,
+                    " Rebase",
+                    raw,
+                    FooterAction::InteractiveRebase,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "t",
+                    bold_yellow,
+                    " Revert",
+                    raw,
+                    FooterAction::RevertCommit,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "g",
+                    bold_red,
+                    " Reset",
+                    raw,
+                    FooterAction::ResetCommit,
                     &mut footer_spans,
                     &mut buttons,
                     &mut col_offset,
@@ -1142,19 +1733,29 @@ pub fn build_footer(app: &App, _width: u16) -> (Line<'static>, Vec<(u16, u16, Fo
                 push_btn(
                     "n",
                     green,
-                    " New",
+                    " Tag",
                     raw,
-                    FooterAction::NewBranch,
+                    FooterAction::CreateTag,
                     &mut footer_spans,
                     &mut buttons,
                     &mut col_offset,
                 );
                 push_btn(
-                    "d",
-                    bold_red,
-                    " Delete",
+                    "/",
+                    bold_yellow,
+                    " Filter",
                     raw,
-                    FooterAction::DeleteBranch,
+                    FooterAction::SearchFilter,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
+                push_btn(
+                    "Enter/l",
+                    bold_cyan,
+                    " Diff",
+                    raw,
+                    FooterAction::ScrollDiff,
                     &mut footer_spans,
                     &mut buttons,
                     &mut col_offset,
@@ -1165,38 +1766,6 @@ pub fn build_footer(app: &App, _width: u16) -> (Line<'static>, Vec<(u16, u16, Fo
                     " Tabs",
                     raw,
                     FooterAction::SwitchTab,
-                    &mut footer_spans,
-                    &mut buttons,
-                    &mut col_offset,
-                );
-            }
-            Panel::Commits => {
-                push_btn(
-                    "Enter/l",
-                    bold_cyan,
-                    " Scroll Diff",
-                    raw,
-                    FooterAction::ScrollDiff,
-                    &mut footer_spans,
-                    &mut buttons,
-                    &mut col_offset,
-                );
-                push_btn(
-                    "[/]",
-                    cyan,
-                    " Commits/Reflog",
-                    raw,
-                    FooterAction::SwitchTab,
-                    &mut footer_spans,
-                    &mut buttons,
-                    &mut col_offset,
-                );
-                push_btn(
-                    "PgUp/PgDn",
-                    cyan,
-                    " Scroll",
-                    raw,
-                    FooterAction::PageInspectorDown,
                     &mut footer_spans,
                     &mut buttons,
                     &mut col_offset,
@@ -1243,6 +1812,16 @@ pub fn build_footer(app: &App, _width: u16) -> (Line<'static>, Vec<(u16, u16, Fo
                     &mut buttons,
                     &mut col_offset,
                 );
+                push_btn(
+                    "b",
+                    bold_cyan,
+                    " Branch",
+                    raw,
+                    FooterAction::StashBranch,
+                    &mut footer_spans,
+                    &mut buttons,
+                    &mut col_offset,
+                );
             }
         }
     }
@@ -1280,11 +1859,13 @@ pub fn build_footer(app: &App, _width: u16) -> (Line<'static>, Vec<(u16, u16, Fo
     );
 
     // Quit (last item has no trailing separator)
+    let q_key = Span::styled("q", bold_red);
+    let q_label = Span::raw(" Quit");
+    let q_width = (q_key.width() + q_label.width()) as u16;
     let start_x = col_offset;
-    footer_spans.push(Span::styled("q", bold_red));
-    footer_spans.push(Span::raw(" Quit"));
-    let btn_len = ("q".len() + " Quit".len()) as u16;
-    col_offset += btn_len;
+    col_offset += q_width;
+    footer_spans.push(q_key);
+    footer_spans.push(q_label);
     buttons.push((start_x, col_offset, FooterAction::Quit));
 
     (Line::from(footer_spans), buttons)
@@ -1421,7 +2002,7 @@ fn render_modals(frame: &mut Frame, app: &App) {
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::Yellow))
                 .title(Span::styled(
-                    " ✏️ Amend Last Commit Message (Enter: Submit, Esc: Cancel) ",
+                    " ✏️ Amend HEAD Commit (Enter: Submit, Esc: Cancel) ",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
@@ -1450,7 +2031,7 @@ fn render_modals(frame: &mut Frame, app: &App) {
 
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "Amended message:",
+                    "Amended HEAD commit message:",
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
@@ -1460,7 +2041,7 @@ fn render_modals(frame: &mut Frame, app: &App) {
             frame.render_widget(Paragraph::new(display_text), v_chunks[1]);
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "Press Enter to amend commit, Esc to dismiss",
+                    "Press Enter to amend HEAD commit, Esc to dismiss",
                     Style::default().fg(Color::DarkGray),
                 )),
                 v_chunks[2],
@@ -1514,8 +2095,12 @@ fn render_modals(frame: &mut Frame, app: &App) {
         ActiveModal::StashSave {
             ref message,
             cursor,
+            include_untracked,
+            staged_only,
+            keep_index,
+            focused_field,
         } => {
-            let area = centered_rect(60, 25, frame.area());
+            let area = centered_rect(65, 35, frame.area());
             frame.render_widget(Clear, area);
 
             let block = Block::default()
@@ -1523,7 +2108,7 @@ fn render_modals(frame: &mut Frame, app: &App) {
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::LightYellow))
                 .title(Span::styled(
-                    " 💾 Stash Working Directory Changes (Enter: Save, Esc: Cancel) ",
+                    " 💾 Stash Working Directory Changes (Enter: Save, Tab: Cycle, Space: Toggle, Esc: Cancel) ",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
@@ -1531,6 +2116,30 @@ fn render_modals(frame: &mut Frame, app: &App) {
 
             let inner = block.inner(area);
             frame.render_widget(block, area);
+
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // label
+                    Constraint::Length(1), // input
+                    Constraint::Length(1), // spacing
+                    Constraint::Length(1), // option 1: untracked
+                    Constraint::Length(1), // option 2: staged only
+                    Constraint::Length(1), // option 3: keep index
+                ])
+                .split(inner);
+
+            let msg_style = if focused_field == 0 {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled("Stash Message:", msg_style)),
+                v_chunks[0],
+            );
 
             let display_text = if message.is_empty() {
                 Span::styled(
@@ -1540,6 +2149,101 @@ fn render_modals(frame: &mut Frame, app: &App) {
             } else {
                 Span::styled(message, Style::default().fg(Color::White))
             };
+            frame.render_widget(Paragraph::new(display_text), v_chunks[1]);
+
+            let render_checkbox =
+                |label: &'static str, checked: bool, is_focused: bool| -> Line<'static> {
+                    let box_char = if checked { "[x] " } else { "[ ] " };
+                    let (box_style, text_style) = if is_focused {
+                        (
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else if checked {
+                        (
+                            Style::default().fg(Color::Green),
+                            Style::default().fg(Color::White),
+                        )
+                    } else {
+                        (
+                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(Color::Gray),
+                        )
+                    };
+                    let indicator = if is_focused { "▶ " } else { "  " };
+                    Line::from(vec![
+                        Span::styled(indicator, Style::default().fg(Color::Cyan)),
+                        Span::styled(box_char, box_style),
+                        Span::styled(label, text_style),
+                    ])
+                };
+
+            frame.render_widget(
+                Paragraph::new(render_checkbox(
+                    "Include Untracked (-u / --include-untracked)",
+                    include_untracked,
+                    focused_field == 1,
+                )),
+                v_chunks[3],
+            );
+            frame.render_widget(
+                Paragraph::new(render_checkbox(
+                    "Staged Only (--staged)",
+                    staged_only,
+                    focused_field == 2,
+                )),
+                v_chunks[4],
+            );
+            frame.render_widget(
+                Paragraph::new(render_checkbox(
+                    "Keep Index (--keep-index)",
+                    keep_index,
+                    focused_field == 3,
+                )),
+                v_chunks[5],
+            );
+
+            if focused_field == 0 {
+                frame.set_cursor_position((v_chunks[1].x + cursor as u16, v_chunks[1].y));
+            }
+        }
+        ActiveModal::BranchRename {
+            ref old_name,
+            ref new_name,
+            cursor,
+        } => {
+            let area = centered_rect(60, 25, frame.area());
+            frame.render_widget(Clear, area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(Span::styled(
+                    format!(
+                        " ✏️ Rename Branch '{}' (Enter: Rename, Esc: Cancel) ",
+                        old_name
+                    ),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let display_text = if new_name.is_empty() {
+                Span::styled(
+                    "Enter new branch name...",
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::styled(new_name, Style::default().fg(Color::White))
+            };
 
             let v_chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -1548,8 +2252,99 @@ fn render_modals(frame: &mut Frame, app: &App) {
 
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "Stash Message:",
+                    "New Branch Name:",
+                    Style::default().fg(Color::Green),
+                )),
+                v_chunks[0],
+            );
+            frame.render_widget(Paragraph::new(display_text), v_chunks[1]);
+
+            frame.set_cursor_position((v_chunks[1].x + cursor as u16, v_chunks[1].y));
+        }
+        ActiveModal::TagCreate {
+            ref target_oid,
+            ref name,
+            cursor,
+        } => {
+            let area = centered_rect(60, 25, frame.area());
+            frame.render_widget(Clear, area);
+
+            let short = &target_oid.to_string()[..7];
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(Span::styled(
+                    format!(" 🏷️ Create Tag at {} (Enter: Create, Esc: Cancel) ", short),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let display_text = if name.is_empty() {
+                Span::styled(
+                    "Enter tag name (e.g. v1.0.0)...",
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::styled(name, Style::default().fg(Color::White))
+            };
+
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "Tag Name:",
                     Style::default().fg(Color::Yellow),
+                )),
+                v_chunks[0],
+            );
+            frame.render_widget(Paragraph::new(display_text), v_chunks[1]);
+
+            frame.set_cursor_position((v_chunks[1].x + cursor as u16, v_chunks[1].y));
+        }
+        ActiveModal::SearchFilter { ref query, cursor } => {
+            let area = centered_rect(60, 25, frame.area());
+            frame.render_widget(Clear, area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Magenta))
+                .title(Span::styled(
+                    " 🔍 Filter Commits (Enter: Apply, Esc: Cancel) ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let display_text = if query.is_empty() {
+                Span::styled(
+                    "Type query to filter commits...",
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::styled(query, Style::default().fg(Color::White))
+            };
+
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "Filter Query:",
+                    Style::default().fg(Color::Magenta),
                 )),
                 v_chunks[0],
             );
@@ -1613,17 +2408,34 @@ fn render_modals(frame: &mut Frame, app: &App) {
                     lines.push(Line::from(
                         "  Space / Enter   Switch / checkout selected branch",
                     ));
+                    lines.push(Line::from("  R               Rename selected local branch"));
                     lines.push(Line::from(
-                        "  n               Create and checkout new branch",
+                        "  f / M           Fast-forward merge branch into HEAD",
                     ));
                     lines.push(Line::from(
-                        "  d               Delete selected branch (with safeguard)",
+                        "  n               Create and checkout new branch / tag",
                     ));
+                    lines.push(Line::from("  d               Delete selected branch / tag"));
                     lines.push(Line::from(
                         "  [ / ]           Switch sub-tabs (Local Branches ↔ Remotes ↔ Tags)",
                     ));
                 }
                 Panel::Commits => {
+                    lines.push(Line::from(
+                        "  Space           Checkout commit in detached HEAD state",
+                    ));
+                    lines.push(Line::from(
+                        "  c               Cherry-pick commit onto current branch",
+                    ));
+                    lines.push(Line::from(
+                        "  g / G           Reset HEAD to commit (Mixed / Hard)",
+                    ));
+                    lines.push(Line::from(
+                        "  n               Create lightweight tag at commit",
+                    ));
+                    lines.push(Line::from(
+                        "  /               Filter commits by summary, SHA, or author",
+                    ));
                     lines.push(Line::from(
                         "  Enter           Inspect commit details and parent diff",
                     ));
@@ -1686,6 +2498,909 @@ fn render_modals(frame: &mut Frame, app: &App) {
             let p = Paragraph::new(lines).block(block);
             frame.render_widget(p, area);
         }
+        ActiveModal::Confirm {
+            ref title,
+            ref prompt,
+            ..
+        } => {
+            let area = centered_rect(60, 25, frame.area());
+            frame.render_widget(Clear, area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::LightRed))
+                .title(Span::styled(
+                    format!(" ⚠️ {} ", title),
+                    Style::default()
+                        .fg(Color::LightRed)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(inner);
+
+            let p = Paragraph::new(prompt.as_str()).style(Style::default().fg(Color::White));
+            frame.render_widget(p, v_chunks[0]);
+
+            let button_spans = Line::from(vec![
+                Span::styled(
+                    " [y] Confirm ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::LightRed)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("    "),
+                Span::styled(
+                    " [n / Esc] Cancel ",
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(button_spans), v_chunks[1]);
+        }
+        ActiveModal::RebaseTodo {
+            ref items,
+            selected,
+            onto_oid,
+        } => {
+            let area = centered_rect(75, 70, frame.area());
+            frame.render_widget(Clear, area);
+
+            let onto_short = if onto_oid.to_string().len() >= 7 {
+                &onto_oid.to_string()[..7]
+            } else {
+                &onto_oid.to_string()
+            };
+
+            let title = format!(
+                " 🔄 Interactive Rebase (onto {}) (Enter: Start, Esc: Abort) ",
+                onto_short
+            );
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(2)])
+                .split(inner);
+
+            let list_items: Vec<ListItem> = items
+                .iter()
+                .enumerate()
+                .map(|(idx, item)| {
+                    let is_sel = idx == selected;
+                    let (action_str, action_color) = match item.action {
+                        crate::sequencer::RebaseAction::Pick => ("pick  ", Color::Green),
+                        crate::sequencer::RebaseAction::Reword => ("reword", Color::Cyan),
+                        crate::sequencer::RebaseAction::Edit => ("edit  ", Color::Yellow),
+                        crate::sequencer::RebaseAction::Squash => ("squash", Color::Magenta),
+                        crate::sequencer::RebaseAction::Fixup => ("fixup ", Color::Blue),
+                        crate::sequencer::RebaseAction::Drop => ("drop  ", Color::Red),
+                    };
+
+                    let prefix = if is_sel { "▶ " } else { "  " };
+                    let style = if is_sel {
+                        Style::default()
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+
+                    let spans = Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(Color::Yellow)),
+                        Span::styled(
+                            format!("[{}] ", action_str),
+                            Style::default()
+                                .fg(action_color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{} ", item.short_oid),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(
+                            item.summary.clone(),
+                            if is_sel {
+                                Style::default().fg(Color::White)
+                            } else {
+                                Style::default().fg(Color::Gray)
+                            },
+                        ),
+                    ]);
+                    ListItem::new(spans).style(style)
+                })
+                .collect();
+
+            let list = List::new(list_items);
+            frame.render_widget(list, v_chunks[0]);
+
+            let help_spans = Line::from(vec![
+                Span::styled(" [p]ick ", Style::default().fg(Color::Green)),
+                Span::styled("[r]eword ", Style::default().fg(Color::Cyan)),
+                Span::styled("[e]dit ", Style::default().fg(Color::Yellow)),
+                Span::styled("[s]quash ", Style::default().fg(Color::Magenta)),
+                Span::styled("[f]fixup ", Style::default().fg(Color::Blue)),
+                Span::styled("[d]rop ", Style::default().fg(Color::Red)),
+                Span::styled("[J/K] move ", Style::default().fg(Color::White)),
+                Span::styled("[Space] cycle ", Style::default().fg(Color::White)),
+                Span::styled(
+                    " [Enter] Start ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(help_spans), v_chunks[1]);
+        }
+        ActiveModal::StashBranch {
+            stash_idx,
+            ref branch_name,
+            cursor,
+        } => {
+            let area = centered_rect(60, 25, frame.area());
+            frame.render_widget(Clear, area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(Span::styled(
+                    format!(
+                        " 🌿 Branch from stash@{{{}}} (Enter: Create & Apply, Esc: Cancel) ",
+                        stash_idx
+                    ),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "New Branch Name:",
+                    Style::default().fg(Color::Green),
+                )),
+                v_chunks[0],
+            );
+
+            let display_text = if branch_name.is_empty() {
+                Span::styled("Enter branch name...", Style::default().fg(Color::DarkGray))
+            } else {
+                Span::styled(branch_name, Style::default().fg(Color::White))
+            };
+            frame.render_widget(Paragraph::new(display_text), v_chunks[1]);
+            frame.set_cursor_position((v_chunks[1].x + cursor as u16, v_chunks[1].y));
+        }
+        ActiveModal::CustomPatchMenu { selected } => {
+            let area = centered_rect(60, 40, frame.area());
+            frame.render_widget(Clear, area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Magenta))
+                .title(Span::styled(
+                    " 🧩 Custom Patch Menu (Enter: Select, Esc: Close) ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let items = [
+                "[1] Apply custom patch to working tree",
+                "[2] Apply custom patch to index (staging)",
+                "[3] Revert custom patch from working tree",
+                "[4] Revert custom patch from index",
+                "[5] Create commit from custom patch",
+                "[6] Clear custom patch basket",
+            ];
+
+            let list_items: Vec<ListItem> = items
+                .iter()
+                .enumerate()
+                .map(|(idx, &label)| {
+                    let is_sel = idx == selected;
+                    let prefix = if is_sel { "▶ " } else { "  " };
+                    let style = if is_sel {
+                        Style::default()
+                            .bg(Color::DarkGray)
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    let spans = Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(Color::Yellow)),
+                        Span::styled(
+                            label,
+                            if is_sel {
+                                Style::default().fg(Color::White)
+                            } else {
+                                Style::default().fg(Color::Gray)
+                            },
+                        ),
+                    ]);
+                    ListItem::new(spans).style(style)
+                })
+                .collect();
+
+            let list = List::new(list_items);
+            frame.render_widget(list, inner);
+        }
+        ActiveModal::WorktreeList {
+            ref items,
+            selected,
+        } => {
+            let area = centered_rect(75, 60, frame.area());
+            frame.render_widget(Clear, area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::LightBlue))
+                .title(Span::styled(
+                    " 🌳 Linked Worktrees (Enter: Switch, a/n: Add, d: Remove, Esc: Close) ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(2)])
+                .split(inner);
+
+            let list_items: Vec<ListItem> = items
+                .iter()
+                .enumerate()
+                .map(|(idx, item)| {
+                    let is_sel = idx == selected;
+                    let prefix = if is_sel { "▶ " } else { "  " };
+                    let style = if is_sel {
+                        Style::default()
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+
+                    let badge = if item.is_main {
+                        Span::styled(
+                            "[MAIN] ",
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else if item.is_locked {
+                        Span::styled(
+                            "[LOCKED] ",
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        )
+                    } else if item.is_prunable {
+                        Span::styled("[PRUNABLE] ", Style::default().fg(Color::DarkGray))
+                    } else {
+                        Span::styled("[LINKED] ", Style::default().fg(Color::Cyan))
+                    };
+
+                    let branch_span = Span::styled(
+                        format!("{:<15} ", item.head_ref),
+                        Style::default().fg(Color::Yellow),
+                    );
+
+                    let path_span = Span::styled(
+                        item.path.display().to_string(),
+                        if is_sel {
+                            Style::default().fg(Color::White)
+                        } else {
+                            Style::default().fg(Color::Gray)
+                        },
+                    );
+
+                    let spans = Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(Color::Yellow)),
+                        badge,
+                        branch_span,
+                        path_span,
+                    ]);
+                    ListItem::new(spans).style(style)
+                })
+                .collect();
+
+            let list = List::new(list_items);
+            frame.render_widget(list, v_chunks[0]);
+
+            let help_spans = Line::from(vec![
+                Span::styled(
+                    " [Enter] Switch worktree ",
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(" [a/n] Add worktree ", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    " [d] Remove linked worktree ",
+                    Style::default().fg(Color::Red),
+                ),
+                Span::styled(" [Esc] Close ", Style::default().fg(Color::DarkGray)),
+            ]);
+            frame.render_widget(Paragraph::new(help_spans), v_chunks[1]);
+        }
+        ActiveModal::WorktreeAdd {
+            ref path,
+            ref branch,
+            create_branch,
+            focused_field,
+            cursor,
+        } => {
+            let area = centered_rect(65, 35, frame.area());
+            frame.render_widget(Clear, area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::LightCyan))
+                .title(Span::styled(
+                    " ➕ Add Linked Worktree (Tab: Cycle, Space: Toggle, Enter: Create, Esc: Cancel) ",
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // path label
+                    Constraint::Length(1), // path input
+                    Constraint::Length(1), // branch label
+                    Constraint::Length(1), // branch input
+                    Constraint::Length(1), // spacing
+                    Constraint::Length(1), // create_branch checkbox
+                ])
+                .split(inner);
+
+            let p_lbl = if focused_field == 0 {
+                Span::styled(
+                    "Worktree Target Path:",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    "Worktree Target Path:",
+                    Style::default().fg(Color::DarkGray),
+                )
+            };
+            frame.render_widget(Paragraph::new(p_lbl), v_chunks[0]);
+
+            let p_txt = if path.is_empty() {
+                Span::styled(
+                    "e.g. ../feature-worktree",
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::styled(path, Style::default().fg(Color::White))
+            };
+            frame.render_widget(Paragraph::new(p_txt), v_chunks[1]);
+
+            let b_lbl = if focused_field == 1 {
+                Span::styled(
+                    "Branch Name:",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled("Branch Name:", Style::default().fg(Color::DarkGray))
+            };
+            frame.render_widget(Paragraph::new(b_lbl), v_chunks[2]);
+
+            let b_txt = if branch.is_empty() {
+                Span::styled("e.g. feature-x", Style::default().fg(Color::DarkGray))
+            } else {
+                Span::styled(branch, Style::default().fg(Color::White))
+            };
+            frame.render_widget(Paragraph::new(b_txt), v_chunks[3]);
+
+            let box_char = if create_branch { "[x] " } else { "[ ] " };
+            let (box_style, text_style) = if focused_field == 2 {
+                (
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (
+                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Gray),
+                )
+            };
+            let indicator = if focused_field == 2 { "▶ " } else { "  " };
+            let cb_line = Line::from(vec![
+                Span::styled(indicator, Style::default().fg(Color::Cyan)),
+                Span::styled(box_char, box_style),
+                Span::styled("Create new branch (-b)", text_style),
+            ]);
+            frame.render_widget(Paragraph::new(cb_line), v_chunks[5]);
+
+            if focused_field == 0 {
+                frame.set_cursor_position((v_chunks[1].x + cursor as u16, v_chunks[1].y));
+            } else if focused_field == 1 {
+                frame.set_cursor_position((v_chunks[3].x + cursor as u16, v_chunks[3].y));
+            }
+        }
+        ActiveModal::RemoteAdd {
+            ref name,
+            ref url,
+            focused_field,
+            cursor,
+        } => {
+            let area = centered_rect(65, 35, frame.area());
+            frame.render_widget(Clear, area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Green))
+                .title(Span::styled(
+                    " 🌐 Add Remote (Enter: Save, Tab: Switch, Esc: Cancel) ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                ])
+                .split(inner);
+
+            let name_style = if focused_field == 0 {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled("Remote Name:", name_style)),
+                v_chunks[0],
+            );
+            let name_display = if name.is_empty() {
+                Span::styled("e.g. origin", Style::default().fg(Color::DarkGray))
+            } else {
+                Span::styled(name, Style::default().fg(Color::White))
+            };
+            frame.render_widget(Paragraph::new(name_display), v_chunks[1]);
+
+            let url_style = if focused_field == 1 {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled("Remote URL:", url_style)),
+                v_chunks[3],
+            );
+            let url_display = if url.is_empty() {
+                Span::styled(
+                    "e.g. git@github.com:user/repo.git",
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::styled(url, Style::default().fg(Color::White))
+            };
+            frame.render_widget(Paragraph::new(url_display), v_chunks[4]);
+
+            let hint = Line::from(vec![
+                Span::styled("Tab: ", Style::default().fg(Color::Cyan)),
+                Span::raw("Next field | "),
+                Span::styled("Enter: ", Style::default().fg(Color::Green)),
+                Span::raw("Confirm | "),
+                Span::styled("Esc: ", Style::default().fg(Color::Red)),
+                Span::raw("Cancel"),
+            ]);
+            frame.render_widget(Paragraph::new(hint), v_chunks[5]);
+
+            if focused_field == 0 {
+                frame.set_cursor_position((v_chunks[1].x + cursor as u16, v_chunks[1].y));
+            } else if focused_field == 1 {
+                frame.set_cursor_position((v_chunks[4].x + cursor as u16, v_chunks[4].y));
+            }
+        }
+        ActiveModal::SubmoduleList {
+            ref items,
+            selected,
+        } => {
+            let area = centered_rect(75, 60, frame.area());
+            frame.render_widget(Clear, area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Green))
+                .title(Span::styled(
+                    " 📦 Submodules (Enter: Enter repo, u: Update, i: Init, Esc: Close) ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            if items.is_empty() {
+                let msg = Paragraph::new("No submodules configured in .gitmodules")
+                    .style(Style::default().fg(Color::DarkGray));
+                frame.render_widget(msg, inner);
+            } else {
+                let list_items: Vec<ListItem> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, sub)| {
+                        let is_sel = idx == selected;
+                        let marker = if is_sel { "▶ " } else { "  " };
+                        let status_span = if sub.is_initialized {
+                            Span::styled("[init] ", Style::default().fg(Color::Green))
+                        } else {
+                            Span::styled("[uninit] ", Style::default().fg(Color::DarkGray))
+                        };
+                        let dirty_span = if sub.is_dirty {
+                            Span::styled(
+                                "[dirty] ",
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                        } else {
+                            Span::raw("")
+                        };
+                        let oid_span = if let Some(oid) = sub.head_oid {
+                            Span::styled(
+                                format!("({}) ", &oid.to_string()[..7]),
+                                Style::default().fg(Color::Yellow),
+                            )
+                        } else {
+                            Span::raw("")
+                        };
+
+                        let style = if is_sel {
+                            Style::default()
+                                .fg(Color::White)
+                                .bg(Color::Rgb(30, 60, 45))
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::White)
+                        };
+
+                        let line = Line::from(vec![
+                            Span::styled(marker, Style::default().fg(Color::Green)),
+                            status_span,
+                            dirty_span,
+                            Span::styled(
+                                &sub.name,
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(" -> "),
+                            Span::styled(&sub.path, Style::default().fg(Color::White)),
+                            Span::raw(" "),
+                            oid_span,
+                            Span::styled(
+                                format!("<{}>", sub.url),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ]);
+                        ListItem::new(line).style(style)
+                    })
+                    .collect();
+
+                let list = List::new(list_items);
+                frame.render_widget(list, inner);
+            }
+        }
+        ActiveModal::BisectMenu {
+            ref state,
+            selected,
+        } => {
+            let area = centered_rect(60, 40, frame.area());
+            frame.render_widget(Clear, area);
+
+            let title = if state.is_active {
+                " 🎯 Git Bisect Controls (Active Session) "
+            } else {
+                " 🎯 Git Bisect Controls "
+            };
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Green))
+                .title(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(2), Constraint::Min(1)])
+                .split(inner);
+
+            let status_line = if state.is_active {
+                Line::from(vec![
+                    Span::styled("Status: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        "BISECTING",
+                        Style::default()
+                            .fg(Color::LightMagenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!(" | Remaining ~{} step(s)", state.remaining_steps)),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("Status: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("INACTIVE", Style::default().fg(Color::Gray)),
+                ])
+            };
+            frame.render_widget(Paragraph::new(status_line), v_chunks[0]);
+
+            let options = if state.is_active {
+                vec![
+                    "1. Mark Current HEAD as Bad (git bisect bad)",
+                    "2. Mark Current HEAD as Good (git bisect good)",
+                    "3. Skip Current Commit (git bisect skip)",
+                    "4. Reset / Abort Bisect (git bisect reset)",
+                ]
+            } else {
+                vec![
+                    "1. Start Bisect with Current HEAD as Bad",
+                    "2. Mark Commit as Good",
+                ]
+            };
+
+            let list_items: Vec<ListItem> = options
+                .iter()
+                .enumerate()
+                .map(|(idx, opt)| {
+                    let is_sel = idx == selected;
+                    let marker = if is_sel { "▶ " } else { "  " };
+                    let style = if is_sel {
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(marker, Style::default().fg(Color::Green)),
+                        Span::styled(*opt, style),
+                    ]))
+                })
+                .collect();
+
+            let list = List::new(list_items);
+            frame.render_widget(list, v_chunks[1]);
+        }
+        ActiveModal::CommandPalette {
+            ref query,
+            cursor,
+            selected,
+            ref commands,
+        } => {
+            let area = centered_rect(70, 60, frame.area());
+            frame.render_widget(Clear, area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(Span::styled(
+                    " 🔍 Command Palette (Esc: Close, Enter: Execute, ↑/↓: Select) ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(2), Constraint::Min(1)])
+                .split(inner);
+
+            let input_line = Line::from(vec![
+                Span::styled(
+                    "> ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    query,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(input_line), v_chunks[0]);
+            frame.set_cursor_position((v_chunks[0].x + 2 + cursor as u16, v_chunks[0].y));
+
+            if commands.is_empty() {
+                let no_res = Paragraph::new("No matching commands found")
+                    .style(Style::default().fg(Color::DarkGray));
+                frame.render_widget(no_res, v_chunks[1]);
+            } else {
+                let avail_height = v_chunks[1].height as usize;
+                let (start_idx, end_idx) = window_range(commands.len(), selected, avail_height);
+
+                let list_items: Vec<ListItem> = commands[start_idx..end_idx]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, cmd)| {
+                        let actual_idx = start_idx + offset;
+                        let is_sel = actual_idx == selected;
+                        let marker = if is_sel { "▶ " } else { "  " };
+
+                        let style = if is_sel {
+                            Style::default()
+                                .fg(Color::White)
+                                .bg(Color::Rgb(30, 60, 45))
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::White)
+                        };
+
+                        let line = Line::from(vec![
+                            Span::styled(marker, Style::default().fg(Color::Green)),
+                            Span::styled(
+                                format!("[{}] ", cmd.category),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                            Span::styled(
+                                cmd.title,
+                                Style::default().fg(if is_sel {
+                                    Color::White
+                                } else {
+                                    Color::Gray
+                                }),
+                            ),
+                            Span::raw("  "),
+                            Span::styled(
+                                format!("({})", cmd.keybinding),
+                                Style::default().fg(Color::Yellow),
+                            ),
+                        ]);
+                        ListItem::new(line).style(style)
+                    })
+                    .collect();
+
+                let list = List::new(list_items);
+                frame.render_widget(list, v_chunks[1]);
+            }
+        }
+        ActiveModal::ProviderLinks { ref urls, selected } => {
+            let area = centered_rect(65, 35, frame.area());
+            frame.render_widget(Clear, area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Green))
+                .title(Span::styled(
+                    " 🌐 Web Provider Links (Enter: Copy Link, Esc: Close) ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let list = [
+                ("Repository", urls.repo_url.as_deref()),
+                ("Commit", urls.commit_url.as_deref()),
+                ("Branch", urls.branch_url.as_deref()),
+                ("Pull Request", urls.pr_url.as_deref()),
+            ];
+            let available: Vec<(&str, &str)> = list
+                .iter()
+                .filter_map(|(l, u)| u.map(|url| (*l, url)))
+                .collect();
+
+            if available.is_empty() {
+                let msg = Paragraph::new("No remote web links detected for this repository")
+                    .style(Style::default().fg(Color::DarkGray));
+                frame.render_widget(msg, inner);
+            } else {
+                let list_items: Vec<ListItem> = available
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, (label, url))| {
+                        let is_sel = idx == selected;
+                        let marker = if is_sel { "▶ " } else { "  " };
+                        let style = if is_sel {
+                            Style::default()
+                                .fg(Color::White)
+                                .bg(Color::Rgb(30, 60, 45))
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::White)
+                        };
+
+                        let line = Line::from(vec![
+                            Span::styled(marker, Style::default().fg(Color::Green)),
+                            Span::styled(
+                                format!("{}: ", label),
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(*url, Style::default().fg(Color::White)),
+                        ]);
+                        ListItem::new(line).style(style)
+                    })
+                    .collect();
+
+                let list = List::new(list_items);
+                frame.render_widget(list, inner);
+            }
+        }
     }
 }
 
@@ -1716,10 +3431,23 @@ pub fn compute_modal_rect(modal: &ActiveModal, screen: Rect) -> Option<Rect> {
         ActiveModal::CommitPrompt { .. } | ActiveModal::CommitAmend { .. } => {
             Some(centered_rect(65, 30, screen))
         }
-        ActiveModal::BranchCreate { .. } | ActiveModal::StashSave { .. } => {
-            Some(centered_rect(60, 25, screen))
-        }
+        ActiveModal::BranchCreate { .. }
+        | ActiveModal::BranchRename { .. }
+        | ActiveModal::TagCreate { .. }
+        | ActiveModal::SearchFilter { .. }
+        | ActiveModal::StashSave { .. }
+        | ActiveModal::StashBranch { .. }
+        | ActiveModal::Confirm { .. } => Some(centered_rect(60, 25, screen)),
+        ActiveModal::CustomPatchMenu { .. } => Some(centered_rect(60, 40, screen)),
+        ActiveModal::WorktreeList { .. } => Some(centered_rect(75, 60, screen)),
+        ActiveModal::WorktreeAdd { .. } => Some(centered_rect(65, 35, screen)),
+        ActiveModal::RemoteAdd { .. } => Some(centered_rect(65, 35, screen)),
+        ActiveModal::SubmoduleList { .. } => Some(centered_rect(75, 60, screen)),
+        ActiveModal::BisectMenu { .. } => Some(centered_rect(60, 40, screen)),
+        ActiveModal::CommandPalette { .. } => Some(centered_rect(70, 60, screen)),
+        ActiveModal::ProviderLinks { .. } => Some(centered_rect(65, 35, screen)),
         ActiveModal::Help => Some(centered_rect(72, 80, screen)),
+        ActiveModal::RebaseTodo { .. } => Some(centered_rect(75, 70, screen)),
     }
 }
 
@@ -1753,7 +3481,14 @@ pub fn compute_modal_layout(modal: &ActiveModal, screen: Rect) -> Option<ModalLa
                 action_rect: Some(v_chunks[2]),
             })
         }
-        ActiveModal::BranchCreate { .. } | ActiveModal::StashSave { .. } => {
+        ActiveModal::BranchCreate { .. }
+        | ActiveModal::BranchRename { .. }
+        | ActiveModal::TagCreate { .. }
+        | ActiveModal::SearchFilter { .. }
+        | ActiveModal::StashSave { .. }
+        | ActiveModal::StashBranch { .. }
+        | ActiveModal::WorktreeAdd { .. }
+        | ActiveModal::RemoteAdd { .. } => {
             let v_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(1), Constraint::Min(1)])
@@ -1764,9 +3499,31 @@ pub fn compute_modal_layout(modal: &ActiveModal, screen: Rect) -> Option<ModalLa
                 action_rect: None,
             })
         }
+        ActiveModal::Confirm { .. } => {
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(inner);
+            Some(ModalLayout {
+                area,
+                input_rect: None,
+                action_rect: Some(v_chunks[1]),
+            })
+        }
         ActiveModal::Help => Some(ModalLayout {
             area,
             input_rect: None,
+            action_rect: None,
+        }),
+        ActiveModal::RebaseTodo { .. }
+        | ActiveModal::CustomPatchMenu { .. }
+        | ActiveModal::WorktreeList { .. }
+        | ActiveModal::SubmoduleList { .. }
+        | ActiveModal::BisectMenu { .. }
+        | ActiveModal::CommandPalette { .. }
+        | ActiveModal::ProviderLinks { .. } => Some(ModalLayout {
+            area,
+            input_rect: Some(inner),
             action_rect: None,
         }),
         ActiveModal::None => None,

@@ -1,0 +1,119 @@
+   Compiling oxidize-tui v0.2.0 (C:\Users\PC\Documents\OXIDIZE\crates\tui)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.65s
+     Running tests\parity_review_probes.rs (target\debug\deps\parity_review_probes-fe67f053b0e6fb53.exe)
+
+running 12 tests
+test app_force_lease_must_use_recorded_remote_oid ... FAILED
+test conflicted_fixup_continue_must_preserve_fixup_semantics ... FAILED
+test corrupted_index_must_not_load_as_repository_truth ... FAILED
+test rebase_must_reject_dirty_worktree_before_mutation ... FAILED
+test rebase_todo_must_exclude_other_branch_commits ... FAILED
+test replay_must_not_merge_distinct_invalid_utf8_as_identical_text ... FAILED
+test stage_hunk_must_reject_changed_worktree_snapshot ... FAILED
+test staging_deleted_file_hunk_must_remove_index_entry ... FAILED
+test stale_short_patch_must_return_error_without_panicking ... FAILED
+test stash_untracked_restore_must_preserve_existing_file ... FAILED
+test tag_delete_must_target_selected_tag ... FAILED
+test worktree_removal_must_reject_dirty_unlocked_tree ... FAILED
+
+failures:
+
+---- app_force_lease_must_use_recorded_remote_oid stdout ----
+
+thread 'app_force_lease_must_use_recorded_remote_oid' (31900) panicked at crates\tui\tests\parity_review_probes.rs:108:5:
+assertion `left == right` failed: Some("✗ Force-push (with lease) failed: terminal error: Updates were rejected because the remote reference has changed since you last checked.")
+  left: "6ff3890313e53fe8b8a18bf1e5e8663d2e7f1111"
+ right: "4e490e07d9e85375da96244111f09c9fed74650d"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- conflicted_fixup_continue_must_preserve_fixup_semantics stdout ----
+
+thread 'conflicted_fixup_continue_must_preserve_fixup_semantics' (26380) panicked at crates\tui\tests\parity_review_probes.rs:157:5:
+assertion `left == right` failed: fixup created an additional commit
+  left: "3"
+ right: "2"
+
+---- corrupted_index_must_not_load_as_repository_truth stdout ----
+
+thread 'corrupted_index_must_not_load_as_repository_truth' (24416) panicked at crates\tui\tests\parity_review_probes.rs:83:5:
+corrupted index accepted as empty
+
+---- rebase_must_reject_dirty_worktree_before_mutation stdout ----
+
+thread 'rebase_must_reject_dirty_worktree_before_mutation' (33676) panicked at crates\tui\tests\parity_review_probes.rs:39:5:
+assertion `left == right` failed: rebase result: Ok(Finished)
+  left: "committed change\n"
+ right: "UNCOMMITTED USER WORK\n"
+
+---- rebase_todo_must_exclude_other_branch_commits stdout ----
+
+thread 'rebase_todo_must_exclude_other_branch_commits' (34444) panicked at crates\tui\tests\parity_review_probes.rs:174:50:
+other branch's commit entered main rebase plan
+
+---- replay_must_not_merge_distinct_invalid_utf8_as_identical_text stdout ----
+
+thread 'replay_must_not_merge_distinct_invalid_utf8_as_identical_text' (35912) panicked at crates\tui\tests\parity_review_probes.rs:137:5:
+distinct binary edits merged cleanly into [239, 191, 189, 10]
+
+---- stage_hunk_must_reject_changed_worktree_snapshot stdout ----
+
+thread 'stage_hunk_must_reject_changed_worktree_snapshot' (28948) panicked at crates\tui\tests\parity_review_probes.rs:76:5:
+staged cached bytes despite changed worktree: one
+selected
+three
+
+---- staging_deleted_file_hunk_must_remove_index_entry stdout ----
+
+thread 'staging_deleted_file_hunk_must_remove_index_entry' (20628) panicked at crates\tui\tests\parity_review_probes.rs:68:5:
+assertion `left == right` failed: deletion was staged as an empty blob
+  left: "100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 0\tf.txt"
+ right: ""
+
+---- stale_short_patch_must_return_error_without_panicking stdout ----
+
+thread 'stale_short_patch_must_return_error_without_panicking' (22372) panicked at crates\diff\src\patch.rs:360:45:
+range end index 3 out of range for slice of length 0
+
+thread 'stale_short_patch_must_return_error_without_panicking' (22372) panicked at crates\diff\src\patch.rs:460:47:
+range end index 3 out of range for slice of length 0
+
+thread 'stale_short_patch_must_return_error_without_panicking' (22372) panicked at crates\tui\tests\parity_review_probes.rs:60:5:
+stale short target panicked
+
+---- stash_untracked_restore_must_preserve_existing_file stdout ----
+
+thread 'stash_untracked_restore_must_preserve_existing_file' (30952) panicked at crates\tui\tests\parity_review_probes.rs:119:5:
+assertion `left == right` failed: stash result: Ok(true)
+  left: "stashed content\n"
+ right: "NEW USER CONTENT\n"
+
+---- tag_delete_must_target_selected_tag stdout ----
+
+thread 'tag_delete_must_target_selected_tag' (36088) panicked at crates\tui\tests\parity_review_probes.rs:93:80:
+assertion `left == right` failed
+  left: "main"
+ right: "release-v1"
+
+---- worktree_removal_must_reject_dirty_unlocked_tree stdout ----
+
+thread 'worktree_removal_must_reject_dirty_unlocked_tree' (36940) panicked at crates\tui\tests\parity_review_probes.rs:52:5:
+dirty tree was removed: Ok(())
+
+
+failures:
+    app_force_lease_must_use_recorded_remote_oid
+    conflicted_fixup_continue_must_preserve_fixup_semantics
+    corrupted_index_must_not_load_as_repository_truth
+    rebase_must_reject_dirty_worktree_before_mutation
+    rebase_todo_must_exclude_other_branch_commits
+    replay_must_not_merge_distinct_invalid_utf8_as_identical_text
+    stage_hunk_must_reject_changed_worktree_snapshot
+    staging_deleted_file_hunk_must_remove_index_entry
+    stale_short_patch_must_return_error_without_panicking
+    stash_untracked_restore_must_preserve_existing_file
+    tag_delete_must_target_selected_tag
+    worktree_removal_must_reject_dirty_unlocked_tree
+
+test result: FAILED. 0 passed; 12 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.66s
+
+error: test failed, to rerun pass `-p oxidize-tui --test parity_review_probes`

@@ -202,6 +202,16 @@ impl GitConfig {
         self.sections.get(&sec_key)
     }
 
+    /// Returns all subsection names for a given section.
+    pub fn subsections(&self, section: &str) -> Vec<String> {
+        let sec_lower = section.to_lowercase();
+        self.sections
+            .keys()
+            .filter(|k| k.section == sec_lower)
+            .filter_map(|k| k.subsection.clone())
+            .collect()
+    }
+
     /// Returns all configured aliases as a map of `alias_name -> command_string`.
     pub fn get_aliases(&self) -> BTreeMap<String, String> {
         self.get_section("alias", None).unwrap_or_default()

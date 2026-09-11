@@ -27,8 +27,14 @@ pub enum DiffError {
 
 pub mod merge;
 pub mod myers;
+pub mod patch;
 pub mod unified;
 
 pub use merge::{is_binary_content, three_way_merge, MergeResult};
 pub use myers::{myers_diff, DiffOp};
+pub use patch::{
+    apply_hunk_forward, apply_hunk_reverse, compute_structured_diff, reconstruct_exact_lines,
+    split_exact_lines, CustomPatchBasket, CustomPatchHunk, ExactLine, PatchLine, PatchLineKind,
+    StructuredHunk,
+};
 pub use unified::{format_unified_diff, Hunk};

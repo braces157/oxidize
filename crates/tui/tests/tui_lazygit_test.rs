@@ -250,6 +250,7 @@ fn test_stash_save_and_apply() {
         ActiveModal::StashSave {
             ref message,
             cursor,
+            ..
         } => {
             assert!(message.is_empty());
             assert_eq!(cursor, 0);

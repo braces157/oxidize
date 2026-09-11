@@ -24,23 +24,71 @@ pub struct ReflogEntry {
     pub message: String,
 }
 
+fn normalize_path_components(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            c => normalized.push(c),
+        }
+    }
+    normalized
+}
+
+fn resolve_common_dir(git_dir: &Path) -> PathBuf {
+    let commondir_file = git_dir.join("commondir");
+    if commondir_file.is_file() {
+        if let Ok(rel) = fs::read_to_string(&commondir_file) {
+            let rel = rel.trim();
+            if !rel.is_empty() {
+                let joined = git_dir.join(rel);
+                if let Ok(canon) = joined.canonicalize() {
+                    return canon;
+                }
+                return normalize_path_components(&joined);
+            }
+        }
+    }
+    git_dir.to_path_buf()
+}
+
 /// Access and manipulation of repository references.
 #[derive(Debug, Clone)]
 pub struct RefStore {
     git_dir: PathBuf,
+    common_dir: PathBuf,
 }
 
 impl RefStore {
-    /// Creates a `RefStore` for the given `.git` directory.
+    /// Creates a `RefStore` for the given `.git` directory, automatically resolving `commondir` if present.
     pub fn new(git_dir: impl Into<PathBuf>) -> Self {
+        let git_dir = git_dir.into();
+        let common_dir = resolve_common_dir(&git_dir);
         Self {
-            git_dir: git_dir.into(),
+            git_dir,
+            common_dir,
         }
     }
 
-    /// Returns the path to the `.git` directory.
+    /// Creates a `RefStore` with an explicit `common_dir`.
+    pub fn with_common_dir(git_dir: impl Into<PathBuf>, common_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            git_dir: git_dir.into(),
+            common_dir: common_dir.into(),
+        }
+    }
+
+    /// Returns the path to the per-worktree `.git` directory.
     pub fn git_dir(&self) -> &Path {
         &self.git_dir
+    }
+
+    /// Returns the path to the common `.git` directory containing shared refs and objects.
+    pub fn common_dir(&self) -> &Path {
+        &self.common_dir
     }
 
     /// Reads and resolves `HEAD`. Returns `(ref_name_or_detached, Option<ObjectId>)`.
@@ -72,7 +120,7 @@ impl RefStore {
     pub fn read_ref(&self, ref_name: &str) -> Result<ObjectId, RefError> {
         let normalized = self.normalize_ref_name(ref_name);
 
-        // 1. Check loose ref file
+        // 1. Check per-worktree loose ref file (e.g. for HEAD, or worktree-local refs)
         let loose_path = self.git_dir.join(&normalized);
         if loose_path.is_file() {
             let content = fs::read_to_string(loose_path)?;
@@ -82,7 +130,19 @@ impl RefStore {
             }
         }
 
-        // 2. Check packed-refs
+        // 2. Check common_dir loose ref file (for shared refs)
+        if self.common_dir != self.git_dir {
+            let common_path = self.common_dir.join(&normalized);
+            if common_path.is_file() {
+                let content = fs::read_to_string(common_path)?;
+                let content = content.trim();
+                if let Ok(oid) = content.parse::<ObjectId>() {
+                    return Ok(oid);
+                }
+            }
+        }
+
+        // 3. Check packed-refs in common_dir
         let packed = self.read_packed_refs()?;
         if let Some(oid) = packed.get(&normalized) {
             return Ok(*oid);
@@ -95,7 +155,7 @@ impl RefStore {
     pub fn list_branches(&self) -> Result<BTreeMap<String, ObjectId>, RefError> {
         let mut branches = BTreeMap::new();
 
-        // 1. Packed refs
+        // 1. Packed refs (from common_dir)
         let packed = self.read_packed_refs()?;
         for (name, oid) in packed {
             if let Some(branch) = name.strip_prefix("refs/heads/") {
@@ -103,13 +163,63 @@ impl RefStore {
             }
         }
 
-        // 2. Loose refs (override packed)
-        let heads_dir = self.git_dir.join("refs/heads");
+        // 2. Loose refs in common_dir (override packed)
+        let heads_dir = self.common_dir.join("refs/heads");
         if heads_dir.exists() {
             self.scan_refs_dir(&heads_dir, "refs/heads", &mut branches)?;
         }
 
+        // 3. Loose refs in git_dir if differing from common_dir
+        if self.git_dir != self.common_dir {
+            let wt_heads_dir = self.git_dir.join("refs/heads");
+            if wt_heads_dir.exists() {
+                self.scan_refs_dir(&wt_heads_dir, "refs/heads", &mut branches)?;
+            }
+        }
+
         Ok(branches)
+    }
+
+    /// Lists all tags (`refs/tags/*`) and their target object IDs.
+    pub fn list_tags(&self) -> Result<BTreeMap<String, ObjectId>, RefError> {
+        let mut tags = BTreeMap::new();
+
+        // 1. Packed refs
+        let packed = self.read_packed_refs()?;
+        for (name, oid) in packed {
+            if let Some(tag) = name.strip_prefix("refs/tags/") {
+                tags.insert(tag.to_string(), oid);
+            }
+        }
+
+        // 2. Loose refs in common_dir (override packed)
+        let tags_dir = self.common_dir.join("refs/tags");
+        if tags_dir.exists() {
+            self.scan_refs_dir(&tags_dir, "refs/tags", &mut tags)?;
+        }
+
+        Ok(tags)
+    }
+
+    /// Lists all remote branches (`refs/remotes/*`) and their target commit IDs.
+    pub fn list_remotes(&self) -> Result<BTreeMap<String, ObjectId>, RefError> {
+        let mut remotes = BTreeMap::new();
+
+        // 1. Packed refs
+        let packed = self.read_packed_refs()?;
+        for (name, oid) in packed {
+            if let Some(remote) = name.strip_prefix("refs/remotes/") {
+                remotes.insert(remote.to_string(), oid);
+            }
+        }
+
+        // 2. Loose refs in common_dir (override packed)
+        let remotes_dir = self.common_dir.join("refs/remotes");
+        if remotes_dir.exists() {
+            self.scan_refs_dir(&remotes_dir, "refs/remotes", &mut remotes)?;
+        }
+
+        Ok(remotes)
     }
 
     fn scan_refs_dir(
@@ -128,7 +238,10 @@ impl RefStore {
             } else if path.is_file() {
                 if let Ok(content) = fs::read_to_string(&path) {
                     if let Ok(oid) = content.trim().parse::<ObjectId>() {
-                        let branch_name = if let Some(stripped) = prefix.strip_prefix("refs/heads")
+                        let item_name = if let Some(stripped) = prefix
+                            .strip_prefix("refs/heads")
+                            .or_else(|| prefix.strip_prefix("refs/tags"))
+                            .or_else(|| prefix.strip_prefix("refs/remotes"))
                         {
                             if stripped.is_empty() {
                                 name
@@ -138,7 +251,7 @@ impl RefStore {
                         } else {
                             name
                         };
-                        out.insert(branch_name, oid);
+                        out.insert(item_name, oid);
                     }
                 }
             }
@@ -158,7 +271,15 @@ impl RefStore {
         oxidize_core::validate_ref_name(&normalized)
             .map_err(|e| RefError::InvalidName(e.to_string()))?;
 
-        let ref_path = self.git_dir.join(&normalized);
+        let ref_path = if normalized == "HEAD" {
+            self.git_dir.join("HEAD")
+        } else {
+            self.common_dir.join(&normalized)
+        };
+        if let Some(parent) = ref_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
         let mut lock = oxidize_core::LockFile::acquire(&ref_path).map_err(|e| match e {
             oxidize_core::CoreError::LockError(msg) => RefError::RevParseError(msg),
             other => RefError::Core(other),
@@ -202,7 +323,12 @@ impl RefStore {
         sig: &Signature,
         message: &str,
     ) -> Result<(), RefError> {
-        let log_path = self.git_dir.join("logs").join(ref_name);
+        let log_base = if ref_name == "HEAD" {
+            &self.git_dir
+        } else {
+            &self.common_dir
+        };
+        let log_path = log_base.join("logs").join(ref_name);
         if let Some(parent) = log_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -219,7 +345,16 @@ impl RefStore {
 
     /// Reads all entries from `.git/logs/<ref_name>`.
     pub fn read_reflog(&self, ref_name: &str) -> Result<Vec<ReflogEntry>, RefError> {
-        let log_path = self.git_dir.join("logs").join(ref_name);
+        let log_path = if ref_name == "HEAD" {
+            self.git_dir.join("logs").join("HEAD")
+        } else {
+            let common_log = self.common_dir.join("logs").join(ref_name);
+            if common_log.exists() {
+                common_log
+            } else {
+                self.git_dir.join("logs").join(ref_name)
+            }
+        };
         if !log_path.exists() {
             return Ok(Vec::new());
         }
@@ -299,8 +434,8 @@ impl RefStore {
         let real_idx = entries.len() - 1 - index;
         let removed = entries.remove(real_idx);
 
-        let stash_ref = self.git_dir.join("refs").join("stash");
-        let stash_log = self.git_dir.join("logs").join("refs").join("stash");
+        let stash_ref = self.common_dir.join("refs").join("stash");
+        let stash_log = self.common_dir.join("logs").join("refs").join("stash");
 
         if entries.is_empty() {
             let _ = fs::remove_file(&stash_ref);
@@ -424,7 +559,7 @@ impl RefStore {
 
     fn read_packed_refs(&self) -> Result<BTreeMap<String, ObjectId>, RefError> {
         let mut map = BTreeMap::new();
-        let packed_path = self.git_dir.join("packed-refs");
+        let packed_path = self.common_dir.join("packed-refs");
         if !packed_path.exists() {
             return Ok(map);
         }
@@ -449,7 +584,10 @@ impl RefStore {
     /// Creates a new branch reference pointing to `target_oid`.
     pub fn create_branch(&self, name: &str, target_oid: &ObjectId) -> Result<(), RefError> {
         oxidize_core::validate_branch_name(name)?;
-        let branch_path = self.git_dir.join("refs/heads").join(name);
+        let branch_path = self.common_dir.join("refs/heads").join(name);
+        if let Some(parent) = branch_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let mut lock = oxidize_core::LockFile::acquire(&branch_path).map_err(|e| match e {
             oxidize_core::CoreError::LockError(msg) => RefError::InvalidName(msg),
             other => RefError::Core(other),
@@ -476,16 +614,81 @@ impl RefStore {
         Ok(())
     }
 
-    /// Deletes a branch reference.
-    pub fn delete_branch(&self, name: &str) -> Result<(), RefError> {
-        oxidize_core::validate_branch_name(name)?;
-        let branch_path = self.git_dir.join("refs/heads").join(name);
-        if !branch_path.exists() {
-            return Err(RefError::NotFound(format!("branch '{}' not found", name)));
+    /// Deletes any reference by full name (e.g. `refs/heads/foo`, `refs/remotes/origin/bar`, `refs/tags/v1.0`),
+    /// removing loose files from `common_dir` and `git_dir`, and removing the entry from `packed-refs`.
+    pub fn delete_ref(&self, ref_name: &str) -> Result<(), RefError> {
+        let mut deleted = false;
+
+        // 1. Try deleting loose ref file from common_dir
+        let ref_path = self.common_dir.join(ref_name);
+        if ref_path.exists() {
+            fs::remove_file(&ref_path)?;
+            deleted = true;
         }
 
-        fs::remove_file(branch_path)?;
+        // 2. Try deleting loose ref file from git_dir if different
+        if self.git_dir != self.common_dir {
+            let wt_ref_path = self.git_dir.join(ref_name);
+            if wt_ref_path.exists() {
+                fs::remove_file(&wt_ref_path)?;
+                deleted = true;
+            }
+        }
+
+        // 3. Remove from packed-refs if present
+        let packed_path = self.common_dir.join("packed-refs");
+        if packed_path.exists() {
+            let content = fs::read_to_string(&packed_path)?;
+            let mut new_lines = Vec::new();
+            let mut in_packed = false;
+            let mut skip_next_peeled = false;
+
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('^') && skip_next_peeled {
+                    skip_next_peeled = false;
+                    continue;
+                }
+                skip_next_peeled = false;
+
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    new_lines.push(line.to_string());
+                    continue;
+                }
+
+                if let Some((_sha, rname)) = trimmed.split_once(' ') {
+                    if rname.trim() == ref_name {
+                        in_packed = true;
+                        skip_next_peeled = true;
+                        continue;
+                    }
+                }
+                new_lines.push(line.to_string());
+            }
+
+            if in_packed {
+                let mut lock = LockFile::acquire(&packed_path).map_err(RefError::Core)?;
+                use std::io::Write;
+                for line in new_lines {
+                    writeln!(lock, "{}", line)?;
+                }
+                lock.commit().map_err(RefError::Core)?;
+                deleted = true;
+            }
+        }
+
+        if !deleted {
+            return Err(RefError::NotFound(format!("ref '{}' not found", ref_name)));
+        }
+
         Ok(())
+    }
+
+    /// Deletes a branch reference, removing loose ref files and purging from packed-refs if present.
+    pub fn delete_branch(&self, name: &str) -> Result<(), RefError> {
+        oxidize_core::validate_branch_name(name)?;
+        let ref_full = format!("refs/heads/{}", name);
+        self.delete_ref(&ref_full)
     }
 
     /// Sets `HEAD` to point symbolically to a branch.
@@ -565,5 +768,108 @@ impl RefStore {
         } else {
             format!("refs/heads/{}", name)
         }
+    }
+
+    /// Renames a branch from `old_name` to `new_name`.
+    /// Updates the branch ref, moves reflog, updates `HEAD` if currently on `old_name`,
+    /// and deletes the old ref (both loose and packed).
+    pub fn rename_branch(&self, old_name: &str, new_name: &str) -> Result<(), RefError> {
+        oxidize_core::validate_branch_name(new_name)?;
+        let old_ref = format!("refs/heads/{}", old_name);
+        let new_ref = format!("refs/heads/{}", new_name);
+
+        let target_oid = self
+            .read_ref(&old_ref)
+            .map_err(|_| RefError::NotFound(format!("branch '{}' not found", old_name)))?;
+
+        // Verify new branch does not already exist
+        if self.read_ref(&new_ref).is_ok() {
+            return Err(RefError::InvalidName(format!(
+                "a branch named '{}' already exists",
+                new_name
+            )));
+        }
+
+        // 1. Create new branch ref pointing to target_oid
+        self.create_branch(new_name, &target_oid)?;
+
+        // 2. If HEAD currently points to old_name, point HEAD to new_name
+        let (current_head_branch, _) = self.resolve_head()?;
+        let is_current = current_head_branch == old_name;
+        if is_current {
+            self.set_head_symbolic(new_name)?;
+        }
+
+        // 3. Move reflog if it exists
+        let old_log = self
+            .common_dir
+            .join("logs")
+            .join("refs/heads")
+            .join(old_name);
+        let new_log = self
+            .common_dir
+            .join("logs")
+            .join("refs/heads")
+            .join(new_name);
+        if old_log.exists() {
+            if let Some(parent) = new_log.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::rename(&old_log, &new_log);
+        }
+
+        // 4. Delete old branch ref
+        self.delete_branch(old_name)?;
+
+        // 5. Append reflog entry
+        let sig = get_default_signature(Some(&self.git_dir));
+        let log_msg = format!(
+            "Branch: renamed refs/heads/{} to refs/heads/{}",
+            old_name, new_name
+        );
+        let _ = self.append_reflog(&new_ref, &ObjectId::ZERO, &target_oid, &sig, &log_msg);
+        if is_current {
+            let _ = self.append_reflog("HEAD", &target_oid, &target_oid, &sig, &log_msg);
+        }
+
+        Ok(())
+    }
+
+    /// Creates a lightweight tag pointing to `target_oid`.
+    pub fn create_tag(&self, name: &str, target_oid: &ObjectId) -> Result<(), RefError> {
+        let tag_ref = format!("refs/tags/{}", name);
+        oxidize_core::validate_ref_name(&tag_ref)
+            .map_err(|e| RefError::InvalidName(e.to_string()))?;
+
+        let tag_path = self.common_dir.join("refs/tags").join(name);
+        if tag_path.exists() {
+            return Err(RefError::InvalidName(format!(
+                "tag '{}' already exists",
+                name
+            )));
+        }
+        let packed = self.read_packed_refs()?;
+        if packed.contains_key(&tag_ref) {
+            return Err(RefError::InvalidName(format!(
+                "tag '{}' already exists",
+                name
+            )));
+        }
+
+        if let Some(parent) = tag_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut lock = LockFile::acquire(&tag_path).map_err(RefError::Core)?;
+        use std::io::Write;
+        writeln!(lock, "{}", target_oid)?;
+        lock.commit().map_err(RefError::Core)?;
+        Ok(())
+    }
+
+    /// Deletes a tag by name, removing loose files and purging from packed-refs.
+    pub fn delete_tag(&self, name: &str) -> Result<(), RefError> {
+        let tag_ref = format!("refs/tags/{}", name);
+        self.delete_ref(&tag_ref)
+            .map_err(|_| RefError::NotFound(format!("tag '{}' not found", name)))
     }
 }

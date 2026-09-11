@@ -43,3 +43,19 @@ fn test_ox_help() {
     assert!(stdout.contains("init"));
     assert!(stdout.contains("commit"));
 }
+
+#[test]
+fn test_ox_fmt_help_and_check() {
+    let bin = ox_bin();
+    let output = Command::new(&bin)
+        .arg("fmt")
+        .arg("--help")
+        .output()
+        .expect("failed to execute ox fmt --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Format Rust source code files"));
+    assert!(stdout.contains("--check"));
+    assert!(stdout.contains("--staged"));
+    assert!(stdout.contains("--install-hook"));
+}

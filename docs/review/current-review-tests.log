@@ -1,0 +1,389 @@
+   Compiling oxidize-diff v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\diff)
+   Compiling oxidize-config v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\config)
+   Compiling oxidize-pack v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\pack)
+   Compiling oxidize-index v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\index)
+   Compiling oxidize-refs v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\refs)
+   Compiling oxidize-core v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\core)
+   Compiling oxidize-transport v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\transport)
+   Compiling oxidize-tui v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\tui)
+   Compiling oxidize-tests v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\tests)
+   Compiling ox v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.83s
+     Running unittests src\main.rs (target\debug\deps\ox-6126abff042fac3e.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\oxidize_config-788bf4d484c97cef.exe)
+
+running 8 tests
+test ini::tests::test_git_config_dot_notation_helpers ... ok
+test ignore::tests::test_gitignore_matching ... ok
+test ini::tests::test_git_config_aliases ... ok
+test ini::tests::test_bare_boolean_flags_and_inline_comments ... ok
+test ini::tests::test_syntax_errors_rejection ... ok
+test ini::tests::test_git_config_parse_and_serialize ... ok
+test ini::tests::test_multivalued_keys_and_roundtrip ... ok
+test ignore::tests::test_hierarchical_gitignore ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\oxidize_core-225501cbd86662b0.exe)
+
+running 13 tests
+test id::tests::test_from_str_roundtrip ... ok
+test path::tests::test_branch_names ... ok
+test path::tests::test_valid_repo_paths ... ok
+test id::tests::test_zero_id ... ok
+test path::tests::test_invalid_ref_names ... ok
+test path::tests::test_invalid_repo_paths ... ok
+test path::tests::test_valid_ref_names ... ok
+test lock::tests::test_lock_drop_cleans_up_without_commit ... ok
+test lock::tests::test_existing_lock_blocks_acquire ... ok
+test store::tests::test_repo_context_discover_bare ... ok
+test store::tests::test_repo_context_discover_standard ... ok
+test lock::tests::test_lock_acquire_and_commit ... ok
+test store::tests::test_repo_context_discover_gitfile_and_linked_worktree ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src\lib.rs (target\debug\deps\oxidize_diff-cb63530945dd4b4b.exe)
+
+running 2 tests
+test merge::tests::test_binary_detection ... ok
+test merge::tests::test_crlf_and_no_trailing_newline_preserved ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\oxidize_index-22cd907c72b8ed8c.exe)
+
+running 6 tests
+test index::tests::test_bulk_add_entries_and_ordering ... ok
+test status::tests::test_status_unmerged_paths ... ok
+test index::tests::test_index_roundtrip ... ok
+test status::tests::test_status_rename_detection ... ok
+test status::tests::test_status_mode_change ... ok
+Initialized empty Git repository in C:/Users/PC/AppData/Local/Temp/.tmpFqpAhO/.git/
+test index::tests::test_index_v4_loading ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running unittests src\lib.rs (target\debug\deps\oxidize_pack-8f3cb87a2b35c1b8.exe)
+
+running 4 tests
+test delta::tests::test_delta_roundtrip ... ok
+test delta::tests::test_empty_and_large_copy ... ok
+test packfile::tests::test_packfile_write_and_unpack_roundtrip ... ok
+test index::tests::test_pack_index_write_and_read_roundtrip ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\oxidize_refs-39e54627a48ef908.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running advanced_porcelain_test.rs (target\debug\deps\advanced_porcelain_test-36e3e7155bccf0ca.exe)
+
+running 5 tests
+test test_gitignore_filtering_with_status_and_add ... ok
+test test_ox_stash_push_list_pop ... ok
+test test_ox_tag_and_blame_and_reflog ... ok
+test test_ox_rm_mv_restore ... ok
+test test_ox_rebase_and_cherry_pick ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s
+
+     Running branch_merge_compatibility_test.rs (target\debug\deps\branch_merge_compatibility_test-99527b40cb2ceb03.exe)
+
+running 2 tests
+test test_three_way_merge_with_conflicts ... ok
+test test_branch_and_checkout_interoperable_with_git ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running index_compatibility_test.rs (target\debug\deps\index_compatibility_test-51f9fd7962757324.exe)
+
+running 3 tests
+test test_ox_write_tree_matches_git_write_tree ... ok
+test test_ox_add_and_git_status_porcelain ... ok
+test test_git_add_and_ox_ls_files ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running new_features_test.rs (target\debug\deps\new_features_test-540f318680e8e5ea.exe)
+
+running 6 tests
+test test_ox_clean ... ok
+test test_ox_config_and_git_parity ... ok
+test test_ox_show_and_rev_list ... ok
+test test_ox_symbolic_ref_and_update_ref_and_show_ref ... ok
+test test_ox_packed_repository_resilience ... ok
+test test_ox_merge_base_and_read_tree ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+
+     Running object_compatibility_test.rs (target\debug\deps\object_compatibility_test-90aa45fa59c58015.exe)
+
+running 4 tests
+test test_hash_object_stdin_matches_real_git ... ok
+test test_cat_file_and_store_interoperability ... ok
+test test_hash_object_file_matches_real_git ... ok
+test test_mktree_and_ls_tree_matches_git ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running pack_compatibility_test.rs (target\debug\deps\pack_compatibility_test-8f752c6d2fd1f38d.exe)
+
+running 3 tests
+test test_ox_pack_objects_verified_by_real_git ... ok
+test test_ox_gc_and_fsck_interoperability ... ok
+test test_ox_verify_pack_on_git_generated_pack ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+
+     Running performance_benchmark_test.rs (target\debug\deps\performance_benchmark_test-7e120d0451a08774.exe)
+
+running 4 tests
+test test_bench_add_throughput ... ok
+test test_bench_status_speed ... ok
+test test_bench_pack_objects_compression_and_speed ... ok
+test test_bench_log_traversal ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.47s
+
+     Running porcelain_compatibility_test.rs (target\debug\deps\porcelain_compatibility_test-836d2ebf6a2878a0.exe)
+
+running 1 test
+test test_commit_and_log_interoperable_with_git ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+     Running safety_boundaries_test.rs (target\debug\deps\safety_boundaries_test-ece075680ea8a120.exe)
+
+running 19 tests
+test test_f11_ssh_hardening ... ok
+test test_f12_transport_protocol_state_machine ... ok
+test test_f13_delta_bounds_and_parser_integrity ... ok
+test test_f04_existing_index_lock_blocks_mutation ... ok
+test test_f05_v4_index_mutation_survives_git ... ok
+test test_f09_ref_traversal_rejected ... ok
+Initialized empty Git repository in .\.git
+test test_f03_rm_without_force_rejected ... ok
+test test_f04_existing_ref_lock_blocks_mutation ... ok
+test test_f03_recursive_rm_preserves_untracked_collateral ... ok
+[master (root-commit) 3532ab6] initial commit
+Switched to branch 'unmerged-feat'
+test test_f02_dirty_checkout_rejected ... ok
+test test_f01_tree_path_traversal_rejected ... ok
+test test_f16_empty_index_commit_deleting_last_file ... ok
+[unmerged-feat f4b1478] feat commit
+Switched to branch 'master'
+test test_f08_packed_checkout ... ok
+test test_f17_cli_and_tui_branch_deletion_safety ... ok
+test test_f06_unmerged_index_rejected_in_write_tree_and_commit ... ok
+test test_f06_merge_conflict_records_stages_and_merge_head ... ok
+test test_f07_stash_stack_middle_drop_and_conflict_preservation ... ok
+test test_f15_status_staging_and_mode_semantics ... ok
+test test_f10_push_safety_and_reachability ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.07s
+
+     Running scope_boundaries_test.rs (target\debug\deps\scope_boundaries_test-7469b63f84038d08.exe)
+
+running 4 tests
+test test_builtin_aliases ... ok
+test test_custom_config_alias ... ok
+test test_status_and_diff_rename_detection ... ok
+test test_index_v4_compatibility_with_git ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running transport_compatibility_test.rs (target\debug\deps\transport_compatibility_test-35982eb254d01160.exe)
+
+running 2 tests
+test test_ox_clone_and_remote_interoperability_with_git ... ok
+test test_ox_fetch_pull_and_push ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.28s
+
+     Running version_test.rs (target\debug\deps\version_test-9bb40b4b4c413d29.exe)
+
+running 3 tests
+test test_ox_fmt_help_and_check ... ok
+test test_ox_help ... ok
+test test_ox_version ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src\lib.rs (target\debug\deps\oxidize_transport-214b455e2ae908a1.exe)
+
+running 15 tests
+test pkt_line::tests::test_pkt_line_encode_decode ... ok
+test protocol::tests::test_parse_push_report_success_and_failures ... ok
+test protocol::tests::test_build_upload_pack_request ... ok
+test pkt_line::tests::test_special_packets ... ok
+test ssh::tests::test_parse_ssh_url_scp ... ok
+test protocol::tests::test_parse_ref_advertisement ... ok
+test protocol::tests::test_protocol_v2_rejection ... ok
+test ssh::tests::test_is_ssh_url ... ok
+test ssh::tests::test_option_shaped_destinations_rejected ... ok
+test ssh::tests::test_parse_command_tokens ... ok
+test ssh::tests::test_parse_ssh_url_protocol_preserves_absolute_path ... ok
+test ssh::tests::test_parse_ssh_url_ipv6 ... ok
+test pkt_line::tests::test_sideband_demux ... ok
+test ssh::tests::test_sq_quote ... ok
+test protocol::tests::test_negotiate_capabilities ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\deps\oxidize_tui-01f730f3318c3d92.exe)
+
+running 7 tests
+test syntax::tests::test_dynamic_language_switch_in_multi_file_diff ... ok
+test syntax::tests::test_highlight_headers_and_hunks ... ok
+test syntax::tests::test_language_detection_from_path ... ok
+test syntax::tests::test_language_detection_from_title ... ok
+test syntax::tests::test_highlight_addition_and_deletion ... ok
+test syntax::tests::test_java_kotlin_csharp_highlighting ... ok
+test syntax::tests::test_sql_and_dockerfile_highlighting ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\tui_lazygit_test.rs (target\debug\deps\tui_lazygit_test-c727fef22812cf0d.exe)
+
+running 7 tests
+test test_vim_window_focus_navigation ... ok
+test test_subtabs_switching ... ok
+test test_status_panel_inspector ... ok
+test test_contextual_help_modal_for_all_panels ... ok
+test test_amend_commit_modal ... ok
+test test_stash_save_and_apply ... ok
+test test_remotes_tags_and_reflog_loading ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+     Running tests\tui_mouse_test.rs (target\debug\deps\tui_mouse_test-236354ce84c8593b.exe)
+
+running 9 tests
+test test_mouse_small_viewport_and_boundary_safety ... ok
+test test_mouse_modal_interactions ... ok
+test test_mouse_subtab_header_clicking ... ok
+test test_mouse_panel_switching_and_focus ... ok
+test test_mouse_wheel_scrolling_contextual ... ok
+test test_mouse_footer_button_clicking ... ok
+test test_mouse_right_click_toggles_staging ... ok
+test test_mouse_double_click_actions ... ok
+test test_mouse_item_clicking_in_lists ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s
+
+     Running tests\tui_robustness_test.rs (target\debug\deps\tui_robustness_test-66a8af687e0f7c1a.exe)
+
+running 7 tests
+[?25h[?1049ltest test_unicode_modal_text_editing_and_cursor_safety ... ok
+test test_terminal_session_guard_state_and_drop ... ok
+test test_small_viewport_graceful_render ... ok
+test test_background_job_non_blocking_and_concurrency_guard ... ok
+test test_selection_stability_across_refresh ... ok
+test test_tui_branch_deletion_unmerged_safety ... ok
+test test_tui_checkout_rejects_dirty_and_untracked_conflicts ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.91s
+
+     Running tests\tui_stage1_test.rs (target\debug\deps\tui_stage1_test-5e5c06a47688b048.exe)
+
+running 7 tests
+test test_app_navigation_and_clamping ... ok
+test test_panel_enum_cycling_and_indexing ... ok
+test test_inspector_scrolling ... ok
+test test_empty_repository_handling ... ok
+test test_ui_rendering_headless_backend ... ok
+test test_stash_loading_and_inspection ... ok
+test test_repository_loading_and_multi_panel_state ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
+
+     Running tests\tui_stage2_test.rs (target\debug\deps\tui_stage2_test-ea0862b0ac8d81d6.exe)
+
+running 5 tests
+test test_discard_untracked_file ... ok
+test test_discard_modified_file ... ok
+test test_stage_and_unstage_modified_file ... ok
+test test_stage_and_unstage_untracked_file ... ok
+test test_stage_all_and_unstage_all ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests\tui_stage3_test.rs (target\debug\deps\tui_stage3_test-7025740ec3e31cbf.exe)
+
+running 5 tests
+test test_modal_text_editing_and_cursor_navigation ... ok
+test test_open_commit_modal_requires_staged_changes ... ok
+test test_modal_rendering_with_test_backend ... ok
+test test_commit_aborted_on_empty_message ... ok
+test test_successful_interactive_commit_workflow ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+     Running tests\tui_stage4_test.rs (target\debug\deps\tui_stage4_test-ae25a623670f68e1.exe)
+
+running 5 tests
+test test_help_modal_and_branch_modal_rendering ... ok
+test test_branch_creation_via_modal ... ok
+test test_branch_deletion ... ok
+test test_branch_checkout_and_working_tree_update ... ok
+test test_stash_pop_and_drop ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+   Doc-tests oxidize_config
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxidize_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxidize_diff
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxidize_index
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxidize_pack
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxidize_refs
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxidize_transport
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxidize_tui
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

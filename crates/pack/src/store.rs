@@ -211,6 +211,37 @@ impl PackStore {
     }
 }
 
+fn normalize_path_components(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            c => normalized.push(c),
+        }
+    }
+    normalized
+}
+
+fn resolve_common_dir(git_dir: &Path) -> PathBuf {
+    let commondir_file = git_dir.join("commondir");
+    if commondir_file.is_file() {
+        if let Ok(rel) = fs::read_to_string(&commondir_file) {
+            let rel = rel.trim();
+            if !rel.is_empty() {
+                let joined = git_dir.join(rel);
+                if let Ok(canon) = joined.canonicalize() {
+                    return canon;
+                }
+                return normalize_path_components(&joined);
+            }
+        }
+    }
+    git_dir.to_path_buf()
+}
+
 /// Unified repository object store checking both loose objects and packfile archives.
 pub struct RepoObjectStore {
     loose: LooseObjectStore,
@@ -218,11 +249,21 @@ pub struct RepoObjectStore {
 }
 
 impl RepoObjectStore {
-    /// Opens the unified store for a given `.git` directory.
+    /// Opens the unified store for a given `.git` directory, automatically resolving `commondir` if present.
     pub fn open(git_dir: impl AsRef<Path>) -> Result<Self, CoreError> {
         let git_dir = git_dir.as_ref();
-        let loose = LooseObjectStore::new(git_dir.join("objects"));
-        let pack = PackStore::open(git_dir)
+        let common_dir = resolve_common_dir(git_dir);
+        Self::open_with_common_dir(git_dir, &common_dir)
+    }
+
+    /// Opens the unified store with explicitly specified `git_dir` and `common_dir`.
+    pub fn open_with_common_dir(
+        _git_dir: impl AsRef<Path>,
+        common_dir: impl AsRef<Path>,
+    ) -> Result<Self, CoreError> {
+        let common_dir = common_dir.as_ref();
+        let loose = LooseObjectStore::new(common_dir.join("objects"));
+        let pack = PackStore::open(common_dir)
             .map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))?;
 
         Ok(Self { loose, pack })

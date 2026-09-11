@@ -291,6 +291,37 @@ impl RepoContext {
                 return Err(CoreError::RepoNotFound);
             }
 
+            // Check if current directory is a linked worktree gitdir
+            if current.join("HEAD").is_file()
+                && current.join("commondir").is_file()
+                && current.join("gitdir").is_file()
+            {
+                let commondir_content = std::fs::read_to_string(current.join("commondir"))?;
+                let rel = commondir_content.trim();
+                let common_dir = normalize_path_components(&current.join(rel));
+
+                let gitdir_content = std::fs::read_to_string(current.join("gitdir"))?;
+                let rel_wt = gitdir_content.trim();
+                let wt_git = if Path::new(rel_wt).is_relative() {
+                    current.join(rel_wt)
+                } else {
+                    PathBuf::from(rel_wt)
+                };
+                let wt_git = normalize_path_components(&wt_git);
+                let worktree = if wt_git.file_name().is_some_and(|n| n == ".git") {
+                    wt_git.parent().map(|p| p.to_path_buf())
+                } else {
+                    Some(wt_git)
+                };
+
+                return Ok(Self {
+                    worktree,
+                    git_dir: current,
+                    common_dir,
+                    is_bare: false,
+                });
+            }
+
             // Check if current directory itself is a bare repository or a .git directory
             if current.join("HEAD").is_file()
                 && current.join("objects").is_dir()

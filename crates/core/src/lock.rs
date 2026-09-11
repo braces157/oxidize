@@ -74,12 +74,28 @@ impl LockFile {
 
         // Atomically replace target with lock file
         if cfg!(windows) && self.target_path.exists() {
-            // On Windows fs::rename replaces existing files in modern std,
-            // but if open handles exist or platform quirks occur, handle cleanly
-            let _ = fs::remove_file(&self.target_path);
+            let backup_path = PathBuf::from(format!("{}.lockbackup", self.target_path.display()));
+            if backup_path.exists() {
+                let _ = fs::remove_file(&backup_path);
+            }
+            if let Err(_e) = fs::rename(&self.target_path, &backup_path) {
+                // If moving to backup fails, attempt standard rename directly
+                fs::rename(&self.lock_path, &self.target_path).map_err(CoreError::Io)?;
+            } else {
+                match fs::rename(&self.lock_path, &self.target_path) {
+                    Ok(()) => {
+                        let _ = fs::remove_file(&backup_path);
+                    }
+                    Err(e) => {
+                        // Restore from backup on failure
+                        let _ = fs::rename(&backup_path, &self.target_path);
+                        return Err(CoreError::Io(e));
+                    }
+                }
+            }
+        } else {
+            fs::rename(&self.lock_path, &self.target_path).map_err(CoreError::Io)?;
         }
-
-        fs::rename(&self.lock_path, &self.target_path).map_err(CoreError::Io)?;
         self.active = false;
         Ok(())
     }

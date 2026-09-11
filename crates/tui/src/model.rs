@@ -245,6 +245,30 @@ pub struct BranchItem {
     pub summary: Option<String>,
 }
 
+/// Decoration (branch, remote, tag, HEAD) attached to a commit in history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitDecoration {
+    /// HEAD pointer (e.g. `HEAD -> master`).
+    Head(String),
+    /// Local branch pointing to this commit.
+    Branch(String),
+    /// Remote tracking branch pointing to this commit.
+    Remote(String),
+    /// Tag pointing to this commit.
+    Tag(String),
+}
+
+/// Mode for resetting to a historical commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetMode {
+    /// Moves branch tip; index and working tree are untouched.
+    Soft,
+    /// Moves branch tip and resets index; working tree is untouched.
+    Mixed,
+    /// Moves branch tip, resets index, and updates working tree.
+    Hard,
+}
+
 /// Represents an entry in the Commits panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitItem {
@@ -264,6 +288,12 @@ pub struct CommitItem {
     pub full_message: String,
     /// Parent commit IDs.
     pub parents: Vec<ObjectId>,
+    /// Calculated ASCII/Unicode graph prefix glyphs for DAG visualization.
+    pub graph_prefix: String,
+    /// Column/lane index in the DAG graph.
+    pub lane: usize,
+    /// Branch and tag decorations on this commit.
+    pub decorations: Vec<CommitDecoration>,
 }
 
 /// Represents an entry in the Stash panel.
@@ -353,6 +383,14 @@ pub struct DiffView {
     pub title: String,
     /// List of formatted diff lines.
     pub lines: Vec<DiffLine>,
+    /// Structured hunks if this diff represents a structured patch.
+    pub hunks: Vec<oxidize_diff::StructuredHunk>,
+    /// Index of currently selected hunk (if any).
+    pub selected_hunk: Option<usize>,
+    /// Optional file path associated with this diff (for hunk staging).
+    pub file_path: Option<String>,
+    /// Whether the file is currently staged or unstaged.
+    pub is_staged: bool,
 }
 
 impl DiffView {
@@ -361,6 +399,10 @@ impl DiffView {
         Self {
             title: title.into(),
             lines: Vec::new(),
+            hunks: Vec::new(),
+            selected_hunk: None,
+            file_path: None,
+            is_staged: false,
         }
     }
 
@@ -370,7 +412,32 @@ impl DiffView {
         Self {
             title: title.into(),
             lines,
+            hunks: Vec::new(),
+            selected_hunk: None,
+            file_path: None,
+            is_staged: false,
         }
+    }
+
+    /// Returns the indices of lines in `lines` that start a hunk (i.e. `DiffLineKind::HunkHeader`).
+    pub fn hunk_start_lines(&self) -> Vec<usize> {
+        self.lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.kind == DiffLineKind::HunkHeader)
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    /// Returns the hunk index for a given line index in `lines`, if any.
+    pub fn hunk_at_line(&self, line_idx: usize) -> Option<usize> {
+        let starts = self.hunk_start_lines();
+        for (i, &start) in starts.iter().enumerate().rev() {
+            if line_idx >= start {
+                return Some(i);
+            }
+        }
+        None
     }
 }
 
@@ -420,6 +487,53 @@ pub struct ReflogItem {
     pub message: String,
 }
 
+/// Action to be executed after explicit user confirmation in a modal dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmAction {
+    DiscardFile(String),
+    DeleteBranch(String),
+    DropStash(usize),
+    DiscardHunk {
+        path: String,
+        hunk_idx: usize,
+    },
+    ResetToCommit {
+        target_oid: ObjectId,
+        short_oid: String,
+        mode: ResetMode,
+    },
+    CherryPick(ObjectId),
+    DeleteTag(String),
+    Revert(ObjectId),
+    RebaseAbort,
+    RemoveWorktree {
+        name: String,
+        force: bool,
+    },
+    DeleteRemote(String),
+    DeleteRemoteBranch {
+        remote: String,
+        branch: String,
+    },
+}
+
+/// Selection choice when resolving three-way merge conflicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictChoice {
+    Ours,
+    Theirs,
+    Both,
+}
+
+/// An item in the global interactive command palette registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandPaletteItem {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub category: &'static str,
+    pub keybinding: &'static str,
+}
+
 /// Floating modal dialog states for interactive user input.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ActiveModal {
@@ -446,13 +560,100 @@ pub enum ActiveModal {
         /// Cursor character position.
         cursor: usize,
     },
-    /// Stash message prompt.
+    /// Branch rename prompt.
+    BranchRename {
+        old_name: String,
+        new_name: String,
+        cursor: usize,
+    },
+    /// Tag creation prompt.
+    TagCreate {
+        target_oid: ObjectId,
+        name: String,
+        cursor: usize,
+    },
+    /// Commit search/filter prompt.
+    SearchFilter { query: String, cursor: usize },
+    /// Interactive rebase plan editor.
+    RebaseTodo {
+        items: Vec<crate::sequencer::RebaseTodoItem>,
+        selected: usize,
+        onto_oid: ObjectId,
+    },
+    /// Stash message prompt with variants.
     StashSave {
         /// Entered message text.
         message: String,
         /// Cursor character position.
         cursor: usize,
+        /// Include untracked files into 3rd parent commit.
+        include_untracked: bool,
+        /// Stash staged changes only.
+        staged_only: bool,
+        /// Keep index staged after stashing.
+        keep_index: bool,
+        /// Focused field (0 = message, 1 = untracked, 2 = staged_only, 3 = keep_index).
+        focused_field: usize,
+    },
+    /// Create branch from stash prompt.
+    StashBranch {
+        stash_idx: usize,
+        branch_name: String,
+        cursor: usize,
+    },
+    /// Custom patch basket operations menu.
+    CustomPatchMenu { selected: usize },
+    /// Interactive worktree list dialog.
+    WorktreeList {
+        items: Vec<crate::ops::WorktreeItem>,
+        selected: usize,
+    },
+    /// Create new linked worktree prompt.
+    WorktreeAdd {
+        path: String,
+        branch: String,
+        create_branch: bool,
+        focused_field: usize,
+        cursor: usize,
+    },
+    /// Add remote repository dialog.
+    RemoteAdd {
+        name: String,
+        url: String,
+        focused_field: usize,
+        cursor: usize,
+    },
+    /// Interactive submodules list dialog.
+    SubmoduleList {
+        items: Vec<crate::ops::SubmoduleItem>,
+        selected: usize,
+    },
+    /// Interactive Git Bisect control menu.
+    BisectMenu {
+        state: crate::ops::BisectState,
+        selected: usize,
+    },
+    /// Global interactive command palette.
+    CommandPalette {
+        query: String,
+        cursor: usize,
+        selected: usize,
+        commands: Vec<CommandPaletteItem>,
+    },
+    /// Remote web provider links (commit/branch/PR).
+    ProviderLinks {
+        urls: crate::ops::ProviderUrls,
+        selected: usize,
     },
     /// Keybindings help cheat sheet.
     Help,
+    /// Confirmation dialog for destructive actions with target preview and consequence warning.
+    Confirm {
+        /// Dialog title.
+        title: String,
+        /// Consequence description / prompt.
+        prompt: String,
+        /// Action to execute on confirmation.
+        action: ConfirmAction,
+    },
 }

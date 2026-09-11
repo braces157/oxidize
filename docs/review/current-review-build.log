@@ -1,0 +1,10 @@
+   Compiling oxidize-core v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\core)
+   Compiling oxidize-pack v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\pack)
+   Compiling oxidize-refs v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\refs)
+   Compiling oxidize-diff v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\diff)
+   Compiling oxidize-config v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\config)
+   Compiling oxidize-index v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\index)
+   Compiling oxidize-transport v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\transport)
+   Compiling oxidize-tui v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\tui)
+   Compiling ox v0.2.0 (C:\Users\PC\AppData\Local\Temp\oxidize-current-review-z9_iugs7\crates\cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.32s
