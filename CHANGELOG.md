@@ -4,6 +4,21 @@ All notable changes to the **Oxidize** project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-12
+
+### Highlights
+- Completed the latest Lazygit-parity TUI work and fixed confirmed review defects across interactive repository workflows.
+- Hardened refs, configuration parsing, ignore handling, filesystem mutation paths, and TUI operation safety.
+- Added regression coverage for remote/ref rollback, staged formatting, Git compatibility, and TUI edge cases.
+
+### Current hardening and CLI updates
+- Raised the declared minimum supported Rust version to 1.88 to match the locked dependency graph.
+- Added `ox remote rename <old> <new>`, including branch configuration updates and remote-tracking ref migration with rollback on failure.
+- Hardened remote add/remove behavior so duplicate and missing remotes fail clearly instead of silently rewriting state.
+- Changed `ox fmt --staged` to operate on staged blob contents in the index, preserving partially staged working-tree changes.
+- Added regression coverage for staged formatting, configuration behavior, ref safety, and compatibility edge cases.
+- Tightened filesystem/configuration error propagation across checkout, merge, cleanup, clone/fetch/push, and ignore loading paths.
+
 ### Phase 1: Scaffolding (Completed)
 - Set up Cargo workspace layout with 9 crates: `core`, `index`, `refs`, `diff`, `pack`, `transport`, `config`, `cli`, `tui`.
 - Established `thiserror` typed error hierarchy per crate and `anyhow` CLI boundary.
@@ -54,7 +69,7 @@ All notable changes to the **Oxidize** project will be documented in this file.
 - Implemented local repository filesystem transport (`resolve_local_path`, `discover_local_refs`, `fetch_local_pack`) supporting both bare and non-bare repos with packed-refs.
 - Implemented full Git INI configuration parser and serializer (`GitConfig`) with URL path normalization.
 - Introduced `ObjectReader` trait in `oxidize-core` allowing zero-copy tree and index checkout straight from packfiles.
-- Added porcelain commands: `ox clone`, `ox fetch`, `ox pull`, `ox push`, `ox remote` (`add`, `remove`).
+- Added porcelain commands: `ox clone`, `ox fetch`, `ox pull`, `ox push`, `ox remote` (`add`, `remove`, `rename`).
 - Differential integration test suite (`tests/transport_compatibility_test.rs`) passing against official `git` verifying bidirectional clone, push, pull, and remote tracking.
 
 ### Phase 8: Advanced Porcelain & UX (Completed)
@@ -98,7 +113,6 @@ All notable changes to the **Oxidize** project will be documented in this file.
   - Added `read_v4_entry` to `IndexEntry` with prefix compression decoding (varint strip count + suffix) and no 8-byte padding.
   - Enabled reading index v4 repositories in `Index::load_from`.
 - Added integration test suite (`tests/scope_boundaries_test.rs`) verifying all four scope boundaries, bringing total passing test suite to 36 tests.
-
 
 
 

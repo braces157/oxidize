@@ -235,7 +235,11 @@ impl SequencerState {
         if let Some(sha) = &self.stopped_sha {
             fs::write(dir.join("stopped-sha"), format!("{}\n", sha))?;
         } else {
-            let _ = fs::remove_file(dir.join("stopped-sha"));
+            match fs::remove_file(dir.join("stopped-sha")) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
         }
 
         let todo_content = Self::format_todo_list(&self.todo);
@@ -243,7 +247,7 @@ impl SequencerState {
 
         for item in &self.todo {
             if let Some(ref m) = item.message {
-                let _ = fs::write(dir.join(format!("msg-{}", item.commit_oid)), m);
+                fs::write(dir.join(format!("msg-{}", item.commit_oid)), m)?;
             }
         }
 

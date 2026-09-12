@@ -33,7 +33,7 @@ Before contributing code, please keep these core tenets in mind:
 
 ### Prerequisites
 
-- **Rust toolchain** (1.80 or later): [rustup.rs](https://rustup.rs)
+- **Rust toolchain** (1.88 or later): [rustup.rs](https://rustup.rs)
 - **Git** (version 2.30+): Used as the ground-truth oracle for differential integration tests.
 
 ### Clone & Build

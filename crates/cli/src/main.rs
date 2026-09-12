@@ -6,8 +6,9 @@ use clap_complete::{generate, Shell};
 use oxidize_config::{GitConfig, GitIgnore};
 use oxidize_core::store::parse_object_from_content;
 use oxidize_core::{
-    find_git_dir, strip_verbatim_prefix, Blob, Commit, FileMode, LooseObjectStore, Object,
-    ObjectId, ObjectReader, ObjectType, RepoContext, Signature, Tag as CoreTag, Tree, TreeEntry,
+    find_git_dir, strip_verbatim_prefix, Blob, Commit, FileMode, LockFile, LooseObjectStore,
+    Object, ObjectId, ObjectReader, ObjectType, RepoContext, Signature, Tag as CoreTag, Tree,
+    TreeEntry,
 };
 use oxidize_diff::{format_unified_diff, three_way_merge};
 use oxidize_index::{
@@ -594,6 +595,13 @@ enum RemoteCommand {
         /// Name of the remote
         name: String,
     },
+    /// Rename the remote named `<old>` to `<new>`
+    Rename {
+        /// Existing remote name
+        old: String,
+        /// New remote name
+        new: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -888,46 +896,7 @@ fn cmd_fmt(check: bool, staged: bool, install_hook: bool, files: Vec<String>) ->
     }
 
     if staged {
-        let git_dir = find_git_dir(Path::new("."))
-            .context("fatal: not a git repository (or any of the parent directories): .git")?;
-        let worktree = git_dir.parent().unwrap_or(&git_dir);
-        let index_path = git_dir.join("index");
-        let index = Index::load_from(&index_path).unwrap_or_default();
-        let store = RepoObjectStore::open(&git_dir)?;
-        let ref_store = RefStore::new(&git_dir);
-        let head_oid_opt = ref_store.resolve_head().ok().and_then(|(_, oid)| oid);
-        let head_tree = head_oid_opt.and_then(|oid| {
-            if let Ok(Object::Commit(c)) = store.read_object(&oid) {
-                Some(c.tree)
-            } else {
-                None
-            }
-        });
-        let gitignore = GitIgnore::load_from_dir(worktree).unwrap_or_default();
-        let status = compute_status_with_ignore(
-            worktree,
-            &index,
-            head_tree.as_ref(),
-            &store,
-            Some(&|p, is_dir| gitignore.is_ignored(p, is_dir)),
-        )?;
-        let mut staged_files = Vec::new();
-        for change in status.staged {
-            let path = match change {
-                StagedChange::New(p)
-                | StagedChange::Modified(p)
-                | StagedChange::Renamed { to: p, .. } => p,
-                StagedChange::Deleted(_) => continue,
-            };
-            if path.ends_with(".rs") {
-                staged_files.push(worktree.join(path).to_string_lossy().to_string());
-            }
-        }
-        if staged_files.is_empty() {
-            println!("No staged Rust files to format.");
-            return Ok(());
-        }
-        return format_files(&staged_files, check);
+        return format_staged_blobs(check);
     }
 
     if !files.is_empty() {
@@ -961,6 +930,114 @@ fn cmd_fmt(check: bool, staged: bool, install_hook: bool, files: Vec<String>) ->
             }
             format_files(&rust_files, check)?;
         }
+    }
+    Ok(())
+}
+
+fn format_staged_blobs(check: bool) -> Result<()> {
+    let ctx = RepoContext::discover(Path::new("."))
+        .context("fatal: not a git repository (or any of the parent directories): .git")?;
+    ctx.worktree
+        .as_deref()
+        .context("cannot format staged files in a bare repository")?;
+    let index_path = ctx.git_dir.join("index");
+    let mut index = Index::load_from(&index_path)?;
+    let store = RepoObjectStore::open_with_common_dir(&ctx.git_dir, &ctx.common_dir)?;
+    let ref_store = RefStore::with_common_dir(&ctx.git_dir, &ctx.common_dir);
+
+    let head_files = match ref_store.resolve_head()?.1 {
+        Some(head_oid) => match store.read_object(&head_oid)? {
+            Object::Commit(commit) => flatten_tree(&store, &commit.tree, "")?,
+            _ => bail!("HEAD does not point to a commit"),
+        },
+        None => BTreeMap::new(),
+    };
+
+    let staged_entry_indexes: Vec<usize> = index
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.stage == 0 && entry.path.ends_with(".rs"))
+        .filter(|(_, entry)| {
+            head_files
+                .get(&entry.path)
+                .is_none_or(|(mode, oid)| *oid != entry.oid || mode.0 != entry.mode)
+        })
+        .map(|(idx, _)| idx)
+        .collect();
+
+    if staged_entry_indexes.is_empty() {
+        println!("No staged Rust files to format.");
+        return Ok(());
+    }
+
+    let temp_dir = tempfile::Builder::new()
+        .prefix("ox-fmt-staged-")
+        .tempdir()
+        .context("failed to create temporary directory for staged formatting")?;
+    let mut unformatted = Vec::new();
+    let mut changed = 0usize;
+
+    for (temp_index, entry_index) in staged_entry_indexes.iter().copied().enumerate() {
+        let entry = index.entries[entry_index].clone();
+        let (obj_type, staged_bytes) = store.read_raw(&entry.oid)?;
+        if obj_type != ObjectType::Blob {
+            bail!("staged entry '{}' does not reference a blob", entry.path);
+        }
+
+        let temp_path = temp_dir.path().join(format!("{}.rs", temp_index));
+        std::fs::write(&temp_path, &staged_bytes)
+            .with_context(|| format!("failed to materialize staged blob for '{}'", entry.path))?;
+
+        let mut cmd = std::process::Command::new("rustfmt");
+        cmd.args(["--edition", "2021"]);
+        if check {
+            cmd.arg("--check");
+        }
+        cmd.arg(&temp_path);
+        let status = cmd
+            .status()
+            .with_context(|| format!("failed to execute rustfmt for staged '{}'", entry.path))?;
+        if !status.success() {
+            if check {
+                unformatted.push(entry.path);
+                continue;
+            }
+            bail!("rustfmt failed for staged '{}'", entry.path);
+        }
+
+        if !check {
+            let formatted = std::fs::read(&temp_path)
+                .with_context(|| format!("failed to read formatted staged '{}'", entry.path))?;
+            if formatted != staged_bytes {
+                let new_oid = store.write_blob(&formatted)?;
+                index.entries[entry_index].oid = new_oid;
+                changed += 1;
+            }
+        }
+    }
+
+    if !unformatted.is_empty() {
+        bail!(
+            "staged Rust formatting check failed for: {}",
+            unformatted.join(", ")
+        );
+    }
+
+    if !check && changed > 0 {
+        index.write_to(&index_path)?;
+    }
+
+    if check {
+        println!(
+            "✓ Formatting check passed for {} staged file(s).",
+            staged_entry_indexes.len()
+        );
+    } else {
+        println!(
+            "✓ Formatted {} staged file(s) in the index; working tree left unchanged.",
+            staged_entry_indexes.len()
+        );
     }
     Ok(())
 }
@@ -1307,7 +1384,7 @@ fn cmd_add(files: Vec<String>) -> Result<()> {
     let store = LooseObjectStore::new(git_dir.join("objects"));
     let index_path = git_dir.join("index");
     let mut index = Index::load_from(&index_path)?;
-    let gitignore = GitIgnore::load_from_dir(repo_root).unwrap_or_default();
+    let gitignore = GitIgnore::load_from_dir(repo_root)?;
 
     if files.is_empty() {
         eprintln!("Nothing specified, nothing added.\nMaybe you wanted to say 'ox add .'?");
@@ -1485,7 +1562,7 @@ fn cmd_status() -> Result<()> {
     let store = RepoObjectStore::open(git_dir)?;
     let index_path = git_dir.join("index");
     let index = Index::load_from(&index_path)?;
-    let gitignore = GitIgnore::load_from_dir(repo_root).unwrap_or_default();
+    let gitignore = GitIgnore::load_from_dir(repo_root)?;
 
     let (branch_name, head_commit, head_tree) = get_head_info(git_dir, &store)?;
     let status = compute_status_with_ignore(
@@ -1761,9 +1838,9 @@ fn cmd_commit(message: Option<String>) -> Result<()> {
     )?;
 
     // Clean up merge state files
-    let _ = std::fs::remove_file(git_dir.join("MERGE_HEAD"));
-    let _ = std::fs::remove_file(git_dir.join("MERGE_MSG"));
-    let _ = std::fs::remove_file(git_dir.join("MERGE_MODE"));
+    remove_file_if_exists(&git_dir.join("MERGE_HEAD"))?;
+    remove_file_if_exists(&git_dir.join("MERGE_MSG"))?;
+    remove_file_if_exists(&git_dir.join("MERGE_MODE"))?;
 
     let short_sha = &commit_oid.to_string()[..7];
     if parents.is_empty() {
@@ -2199,7 +2276,7 @@ fn cmd_clean(force: bool, directories: bool, dry_run: bool) -> Result<()> {
         None => None,
     };
 
-    let gitignore = GitIgnore::load_from_dir(repo_root).unwrap_or_default();
+    let gitignore = GitIgnore::load_from_dir(repo_root)?;
     let ignore_fn = |rel: &str, is_dir: bool| gitignore.is_ignored(rel, is_dir);
 
     let status = compute_status_with_ignore(
@@ -2528,18 +2605,18 @@ fn checkout_tree_and_update_index(
                 if let Some(parent) = full_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                let obj = store.read_object(oid)?;
-                if let Object::Blob(blob) = obj {
-                    std::fs::write(&full_path, &blob.data)?;
-                }
-                if let Ok(meta) = std::fs::metadata(&full_path) {
-                    let entry = IndexEntry::from_fs_metadata(path.clone(), *oid, &meta, 0);
-                    index.add_entry(entry);
-                }
+                let blob = match store.read_object(oid)? {
+                    Object::Blob(blob) => blob,
+                    _ => bail!("checkout expected blob for '{}'", path),
+                };
+                std::fs::write(&full_path, &blob.data)?;
+                let meta = std::fs::metadata(&full_path)?;
+                let entry = IndexEntry::from_fs_metadata(path.clone(), *oid, &meta, 0);
+                index.add_entry(entry);
             } else {
                 // Removed in target
                 if full_path.exists() {
-                    let _ = std::fs::remove_file(&full_path);
+                    std::fs::remove_file(&full_path)?;
                 }
                 index.remove_entry(path);
                 let mut parent = full_path.parent();
@@ -2561,7 +2638,7 @@ fn checkout_tree_and_update_index(
             if !target_map.contains_key(&entry.path) {
                 let full_path = oxidize_core::safe_join(repo_root, &entry.path)?;
                 if full_path.exists() {
-                    let _ = std::fs::remove_file(&full_path);
+                    std::fs::remove_file(&full_path)?;
                 }
             }
         }
@@ -2574,15 +2651,14 @@ fn checkout_tree_and_update_index(
                 std::fs::create_dir_all(parent)?;
             }
 
-            let obj = store.read_object(&oid)?;
-            if let Object::Blob(blob) = obj {
-                std::fs::write(&full_path, &blob.data)?;
-            }
-
-            if let Ok(meta) = std::fs::metadata(&full_path) {
-                let entry = IndexEntry::from_fs_metadata(path, oid, &meta, 0);
-                index.add_entry(entry);
-            }
+            let blob = match store.read_object(&oid)? {
+                Object::Blob(blob) => blob,
+                _ => bail!("checkout expected blob for '{}'", path),
+            };
+            std::fs::write(&full_path, &blob.data)?;
+            let meta = std::fs::metadata(&full_path)?;
+            let entry = IndexEntry::from_fs_metadata(path, oid, &meta, 0);
+            index.add_entry(entry);
         }
     }
 
@@ -2756,9 +2832,9 @@ fn cmd_merge(abort: bool, commit_opt: Option<String>) -> Result<()> {
             true,
         )?;
         index.write_to(&index_path)?;
-        let _ = std::fs::remove_file(git_dir.join("MERGE_HEAD"));
-        let _ = std::fs::remove_file(git_dir.join("MERGE_MSG"));
-        let _ = std::fs::remove_file(git_dir.join("MERGE_MODE"));
+        remove_file_if_exists(&git_dir.join("MERGE_HEAD"))?;
+        remove_file_if_exists(&git_dir.join("MERGE_MSG"))?;
+        remove_file_if_exists(&git_dir.join("MERGE_MODE"))?;
         println!("Merge aborted.");
         return Ok(());
     }
@@ -2867,7 +2943,7 @@ fn cmd_merge(abort: bool, commit_opt: Option<String>) -> Result<()> {
                 ));
             } else {
                 if full_path.exists() {
-                    let _ = std::fs::remove_file(&full_path);
+                    std::fs::remove_file(&full_path)?;
                 }
                 index.remove_entry(&path);
             }
@@ -3336,7 +3412,8 @@ fn cmd_gc() -> Result<()> {
 
     // Prune packed loose objects
     for file in files_to_prune {
-        let _ = std::fs::remove_file(&file);
+        std::fs::remove_file(&file)
+            .with_context(|| format!("failed to prune packed loose object '{}'", file.display()))?;
     }
 
     // Clean up empty directories
@@ -3346,7 +3423,11 @@ fn cmd_gc() -> Result<()> {
             if path.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.len() == 2 {
-                    let _ = std::fs::remove_dir(&path);
+                    match std::fs::remove_dir(&path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+                        Err(error) => return Err(error.into()),
+                    }
                 }
             }
         }
@@ -3518,7 +3599,7 @@ fn cmd_clone(repository: String, directory: Option<String>) -> Result<()> {
 
     // Configure remote in .git/config
     let config_path = git_dir.join("config");
-    let mut config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+    let mut config = GitConfig::load_from_file(&config_path)?;
     config.add_remote("origin", &repository);
 
     if remote_refs.is_empty() || pack_bytes.is_empty() {
@@ -3606,7 +3687,7 @@ fn cmd_clone(repository: String, directory: Option<String>) -> Result<()> {
 fn cmd_fetch(remote_opt: Option<String>) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
     let config_path = git_dir.join("config");
-    let config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+    let config = GitConfig::load_from_file(&config_path)?;
 
     let remote_name = remote_opt.unwrap_or_else(|| "origin".to_string());
     let url = config.get_remote_url(&remote_name).ok_or_else(|| {
@@ -3746,7 +3827,7 @@ fn is_ancestor(
 fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>, force: bool) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
     let config_path = git_dir.join("config");
-    let config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+    let config = GitConfig::load_from_file(&config_path)?;
 
     let remote_name = remote_opt.unwrap_or_else(|| "origin".to_string());
     let url = config.get_remote_url(&remote_name).ok_or_else(|| {
@@ -3908,12 +3989,19 @@ fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>, force: bool)
 
     // Update local remote tracking ref: refs/remotes/<remote>/<branch>
     let tracking_ref = format!("refs/remotes/{}/{}", remote_name, branch);
-    ref_store.update_ref(
-        &tracking_ref,
-        &local_oid,
-        None,
-        &format!("push: update tracking ref {}", remote_name),
-    )?;
+    ref_store
+        .update_ref(
+            &tracking_ref,
+            &local_oid,
+            None,
+            &format!("push: update tracking ref {}", remote_name),
+        )
+        .with_context(|| {
+            format!(
+                "remote push succeeded, but local tracking ref '{}' could not be updated",
+                tracking_ref
+            )
+        })?;
 
     let force_flag = if force && !remote_old_oid.is_zero() && !is_ff {
         "+"
@@ -3938,7 +4026,7 @@ fn cmd_push(remote_opt: Option<String>, branch_opt: Option<String>, force: bool)
 fn cmd_remote(subcommand_opt: Option<RemoteCommand>) -> Result<()> {
     let git_dir = find_git_dir(Path::new("."))?;
     let config_path = git_dir.join("config");
-    let mut config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+    let mut config = GitConfig::load_from_file(&config_path)?;
 
     match subcommand_opt {
         None => {
@@ -3947,19 +4035,83 @@ fn cmd_remote(subcommand_opt: Option<RemoteCommand>) -> Result<()> {
             }
         }
         Some(RemoteCommand::Add { name, url }) => {
+            if config.get_remote_url(&name).is_some() {
+                bail!("error: remote '{}' already exists", name);
+            }
             config.add_remote(&name, &url);
             config.save_to_file(&config_path)?;
         }
         Some(RemoteCommand::Remove { name }) => {
-            config.remove_remote(&name);
+            let original = std::fs::read(&config_path)?;
+            if !config.remove_remote(&name) {
+                bail!("error: No such remote: '{}'", name);
+            }
             config.save_to_file(&config_path)?;
-            let remotes_dir = git_dir.join("refs").join("remotes").join(&name);
-            if remotes_dir.exists() {
-                let _ = std::fs::remove_dir_all(remotes_dir);
+            let ref_store = RefStore::new(&git_dir);
+            if let Err(error) = ref_store.remove_remote_refs(&name) {
+                if let Err(rollback_error) = restore_file_atomic(&config_path, &original) {
+                    bail!(
+                        "failed to remove tracking refs for remote '{}': {}; restoring config also failed: {}",
+                        name,
+                        error,
+                        rollback_error
+                    );
+                }
+                return Err(error.into());
+            }
+        }
+        Some(RemoteCommand::Rename { old, new }) => {
+            if config.get_remote_url(&new).is_some() {
+                bail!("error: remote '{}' already exists", new);
+            }
+            let original = std::fs::read(&config_path)?;
+            if !config.rename_subsection("remote", &old, &new)? {
+                bail!("error: No such remote: '{}'", old);
+            }
+            config.replace_in_values(
+                "remote",
+                Some(&new),
+                "fetch",
+                &format!("refs/remotes/{}/", old),
+                &format!("refs/remotes/{}/", new),
+            );
+            for branch in config.subsections("branch") {
+                if config.get("branch", Some(&branch), "remote") == Some(old.as_str()) {
+                    config.set("branch", Some(&branch), "remote", &new);
+                }
+            }
+            config.save_to_file(&config_path)?;
+            let ref_store = RefStore::new(&git_dir);
+            if let Err(error) = ref_store.rename_remote_refs(&old, &new) {
+                if let Err(rollback_error) = restore_file_atomic(&config_path, &original) {
+                    bail!(
+                        "failed to rename tracking refs from '{}' to '{}': {}; restoring config also failed: {}",
+                        old,
+                        new,
+                        error,
+                        rollback_error
+                    );
+                }
+                return Err(error.into());
             }
         }
     }
     Ok(())
+}
+
+fn restore_file_atomic(path: &Path, content: &[u8]) -> Result<()> {
+    let mut lock = LockFile::acquire(path)?;
+    lock.write_all(content)?;
+    lock.commit()?;
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn cmd_rm(cached: bool, recursive: bool, force: bool, files: Vec<String>) -> Result<()> {
@@ -3972,13 +4124,10 @@ fn cmd_rm(cached: bool, recursive: bool, force: bool, files: Vec<String>) -> Res
 
     // Resolve HEAD tree to check staged changes vs HEAD
     let head_map = match ref_store.resolve_head()?.1 {
-        Some(head_oid) => {
-            if let Ok(Object::Commit(commit)) = store.read_object(&head_oid) {
-                flatten_tree(&store, &commit.tree, "").unwrap_or_default()
-            } else {
-                BTreeMap::new()
-            }
-        }
+        Some(head_oid) => match store.read_object(&head_oid)? {
+            Object::Commit(commit) => flatten_tree(&store, &commit.tree, "")?,
+            _ => bail!("HEAD does not point to a commit"),
+        },
         None => BTreeMap::new(),
     };
 
@@ -4077,7 +4226,7 @@ fn cmd_rm(cached: bool, recursive: bool, force: bool, files: Vec<String>) -> Res
         if !cached {
             let full_path = oxidize_core::safe_join(repo_root, rel_path)?;
             if full_path.exists() {
-                let _ = std::fs::remove_file(&full_path);
+                std::fs::remove_file(&full_path)?;
             }
             // Clean up empty directories only
             let mut parent = full_path.parent();
@@ -4905,10 +5054,10 @@ fn cmd_bisect(args: Vec<String>) -> Result<()> {
             let start_file = git_dir.join("BISECT_START");
             if start_file.exists() {
                 let orig_branch = std::fs::read_to_string(&start_file)?.trim().to_string();
-                let _ = std::fs::remove_file(start_file);
-                let _ = std::fs::remove_file(git_dir.join("BISECT_BAD"));
-                let _ = std::fs::remove_file(git_dir.join("BISECT_GOOD"));
                 cmd_checkout(None, Some(orig_branch))?;
+                remove_file_if_exists(&start_file)?;
+                remove_file_if_exists(&git_dir.join("BISECT_BAD"))?;
+                remove_file_if_exists(&git_dir.join("BISECT_GOOD"))?;
             } else {
                 println!("We are not bisecting.");
             }

@@ -5,10 +5,11 @@ use oxidize_config::GitConfig;
 use oxidize_core::id::ObjectId;
 use oxidize_core::object::{Blob, Commit, Object, Signature};
 use oxidize_core::store::LooseObjectStore;
+use oxidize_core::LockFile;
 use oxidize_diff::{three_way_merge, CustomPatchBasket};
 use oxidize_index::{flatten_tree, write_tree, Index, IndexEntry};
 use oxidize_pack::{PackIndex, RepoObjectStore};
-use oxidize_refs::RefStore;
+use oxidize_refs::{RefError, RefStore};
 use oxidize_transport::{
     discover_local_refs, fetch_local_pack, is_ssh_url, resolve_local_path, SmartHttpClient,
     SshClient,
@@ -31,6 +32,48 @@ fn resolve_common_dir(git_dir: &Path) -> std::path::PathBuf {
         }
     }
     git_dir.to_path_buf()
+}
+
+fn load_repo_config(git_dir: &Path) -> Result<GitConfig, TuiError> {
+    GitConfig::load_from_file(git_dir.join("config"))
+        .map_err(|error| TuiError::Terminal(format!("cannot read repository config: {}", error)))
+}
+
+fn rollback_config(
+    config_path: &Path,
+    original: &[u8],
+    operation_error: impl std::fmt::Display,
+) -> TuiError {
+    let restore = (|| -> Result<(), TuiError> {
+        let mut lock =
+            LockFile::acquire(config_path).map_err(|e| TuiError::Terminal(e.to_string()))?;
+        use std::io::Write;
+        lock.write_all(original)?;
+        lock.commit().map_err(|e| TuiError::Terminal(e.to_string()))
+    })();
+    match restore {
+        Ok(()) => TuiError::Terminal(operation_error.to_string()),
+        Err(rollback_error) => TuiError::Terminal(format!(
+            "{}; restoring repository config also failed: {}",
+            operation_error, rollback_error
+        )),
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), TuiError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn remove_dir_all_if_exists(path: &Path) -> Result<(), TuiError> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn collect_untracked_files(
@@ -74,6 +117,19 @@ pub fn read_blob_text(store: &RepoObjectStore, oid: &ObjectId) -> String {
     }
 }
 
+fn read_blob_text_required(store: &RepoObjectStore, oid: &ObjectId) -> Result<String, TuiError> {
+    match store
+        .read_object(oid)
+        .map_err(|e| TuiError::Terminal(e.to_string()))?
+    {
+        Object::Blob(blob) => Ok(String::from_utf8_lossy(&blob.data).into_owned()),
+        _ => Err(TuiError::Terminal(format!(
+            "object '{}' referenced by the index is not a blob",
+            oid
+        ))),
+    }
+}
+
 /// Stages multiple paths in a single atomic index transaction, supporting single files, deletions, and directories recursively.
 pub fn stage_paths(
     repo_root: &Path,
@@ -86,7 +142,8 @@ pub fn stage_paths(
     let common_dir = resolve_common_dir(git_dir);
     let store = LooseObjectStore::new(common_dir.join("objects"));
 
-    let gitignore = oxidize_config::GitIgnore::load_from_dir(repo_root).unwrap_or_default();
+    let gitignore = oxidize_config::GitIgnore::load_from_dir(repo_root)
+        .map_err(|e| TuiError::Terminal(e.to_string()))?;
 
     let mut files_to_stage = Vec::new();
     let mut deletions = Vec::new();
@@ -117,16 +174,14 @@ pub fn stage_paths(
     files_to_stage.dedup();
 
     for rel_path in files_to_stage {
-        let full_path = match oxidize_core::safe_join(repo_root, &rel_path) {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
-        if let (Ok(data), Ok(meta)) = (fs::read(&full_path), fs::metadata(&full_path)) {
-            let blob = Object::Blob(Blob::new(data));
-            let oid = store.write_object(&blob)?;
-            let entry = IndexEntry::from_fs_metadata(rel_path, oid, &meta, 0);
-            index.add_entry(entry);
-        }
+        let full_path = oxidize_core::safe_join(repo_root, &rel_path)
+            .map_err(|e| TuiError::Terminal(e.to_string()))?;
+        let data = fs::read(&full_path)?;
+        let meta = fs::metadata(&full_path)?;
+        let blob = Object::Blob(Blob::new(data));
+        let oid = store.write_object(&blob)?;
+        let entry = IndexEntry::from_fs_metadata(rel_path, oid, &meta, 0);
+        index.add_entry(entry);
     }
 
     index
@@ -157,15 +212,17 @@ pub fn unstage_paths(
 
     let store = RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
 
-    let head_map = head_oid_opt
-        .and_then(|oid| {
-            if let Ok(Object::Commit(c)) = store.read_object(&oid) {
-                flatten_tree(&store, &c.tree, "").ok()
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
+    let head_map = match head_oid_opt {
+        Some(oid) => match store
+            .read_object(&oid)
+            .map_err(|e| TuiError::Terminal(e.to_string()))?
+        {
+            Object::Commit(commit) => flatten_tree(&store, &commit.tree, "")
+                .map_err(|e| TuiError::Terminal(e.to_string()))?,
+            _ => return Err(TuiError::Terminal("HEAD is not a commit".to_string())),
+        },
+        None => BTreeMap::new(),
+    };
 
     for p in paths {
         let rel_path = p.as_ref();
@@ -223,7 +280,7 @@ pub fn stage_hunk(
     let store = RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
 
     let current_staged_text = if let Some(entry) = index.find_entry(rel_path) {
-        read_blob_text(&store, &entry.oid)
+        read_blob_text_required(&store, &entry.oid)?
     } else {
         String::new()
     };
@@ -307,25 +364,30 @@ pub fn unstage_hunk(
         .find_entry(rel_path)
         .ok_or_else(|| TuiError::Terminal(format!("File '{}' not found in index", rel_path)))?;
 
-    let current_staged_text = read_blob_text(&store, &entry.oid);
+    let current_staged_text = read_blob_text_required(&store, &entry.oid)?;
 
     let new_staged_text =
         oxidize_diff::apply_hunk_reverse(&current_staged_text, hunk).map_err(TuiError::Terminal)?;
 
     let ref_store = RefStore::with_common_dir(git_dir, &common_dir);
-    let head_oid_opt = ref_store.resolve_head().ok().and_then(|(_, o)| o);
-    let head_map = head_oid_opt
-        .and_then(|oid| {
-            if let Ok(Object::Commit(c)) = store.read_object(&oid) {
-                flatten_tree(&store, &c.tree, "").ok()
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
+    let head_oid_opt = ref_store
+        .resolve_head()
+        .map_err(|e| TuiError::Terminal(e.to_string()))?
+        .1;
+    let head_map = match head_oid_opt {
+        Some(oid) => match store
+            .read_object(&oid)
+            .map_err(|e| TuiError::Terminal(e.to_string()))?
+        {
+            Object::Commit(commit) => flatten_tree(&store, &commit.tree, "")
+                .map_err(|e| TuiError::Terminal(e.to_string()))?,
+            _ => return Err(TuiError::Terminal("HEAD is not a commit".to_string())),
+        },
+        None => BTreeMap::new(),
+    };
 
     if let Some((_mode, head_oid)) = head_map.get(rel_path) {
-        let head_text = read_blob_text(&store, head_oid);
+        let head_text = read_blob_text_required(&store, head_oid)?;
         if head_text == new_staged_text {
             let full_path = oxidize_core::safe_join(repo_root, rel_path)
                 .map_err(|e| TuiError::Terminal(e.to_string()))?;
@@ -413,12 +475,17 @@ pub fn discard_path(repo_root: &Path, git_dir: &Path, rel_path: &str) -> Result<
         // Tracked file: restore content from index blob
         let store =
             RepoObjectStore::open(git_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
-        if let Ok(Object::Blob(blob)) = store.read_object(&entry.oid) {
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(&full_path, &blob.data)?;
+        let blob = match store
+            .read_object(&entry.oid)
+            .map_err(|e| TuiError::Terminal(e.to_string()))?
+        {
+            Object::Blob(blob) => blob,
+            _ => return Err(TuiError::Terminal("index entry is not a blob".to_string())),
+        };
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent)?;
         }
+        fs::write(&full_path, &blob.data)?;
     } else {
         // Untracked file: delete from disk
         if full_path.is_file() {
@@ -566,9 +633,9 @@ pub fn create_commit(
         .map_err(|e| TuiError::Terminal(e.to_string()))?;
 
     // Clean up merge state files
-    let _ = fs::remove_file(git_dir.join("MERGE_HEAD"));
-    let _ = fs::remove_file(git_dir.join("MERGE_MSG"));
-    let _ = fs::remove_file(git_dir.join("MERGE_MODE"));
+    remove_file_if_exists(&git_dir.join("MERGE_HEAD"))?;
+    remove_file_if_exists(&git_dir.join("MERGE_MSG"))?;
+    remove_file_if_exists(&git_dir.join("MERGE_MODE"))?;
 
     Ok(commit_oid)
 }
@@ -645,7 +712,9 @@ pub fn checkout_tree_and_update_index(
     };
 
     let head_map = match head_tree_oid {
-        Some(ref oid) => flatten_tree(&store, oid, "").unwrap_or_default(),
+        Some(ref oid) => {
+            flatten_tree(&store, oid, "").map_err(|e| TuiError::Terminal(e.to_string()))?
+        }
         None => BTreeMap::new(),
     };
 
@@ -719,17 +788,26 @@ pub fn checkout_tree_and_update_index(
                 if let Some(parent) = full_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                if let Ok(Object::Blob(blob)) = store.read_object(oid) {
-                    fs::write(&full_path, &blob.data)?;
-                }
-                if let Ok(meta) = fs::metadata(&full_path) {
-                    let entry = IndexEntry::from_fs_metadata(path.clone(), *oid, &meta, 0);
-                    index.add_entry(entry);
-                }
+                let blob = match store
+                    .read_object(oid)
+                    .map_err(|e| TuiError::Terminal(e.to_string()))?
+                {
+                    Object::Blob(blob) => blob,
+                    _ => {
+                        return Err(TuiError::Terminal(format!(
+                            "checkout expected blob for '{}'",
+                            path
+                        )))
+                    }
+                };
+                fs::write(&full_path, &blob.data)?;
+                let meta = fs::metadata(&full_path)?;
+                let entry = IndexEntry::from_fs_metadata(path.clone(), *oid, &meta, 0);
+                index.add_entry(entry);
             } else {
                 // Removed in target
                 if full_path.exists() {
-                    let _ = fs::remove_file(&full_path);
+                    fs::remove_file(&full_path)?;
                 }
                 index.remove_entry(path);
                 let mut parent = full_path.parent();
@@ -763,7 +841,7 @@ pub fn checkout_tree_and_update_index(
                 Err(e) => return Err(TuiError::Terminal(e.to_string())),
             };
             if full_path.exists() {
-                let _ = fs::remove_file(&full_path);
+                fs::remove_file(&full_path)?;
             }
             let mut parent = full_path.parent();
             while let Some(p) = parent {
@@ -787,14 +865,22 @@ pub fn checkout_tree_and_update_index(
                 fs::create_dir_all(parent)?;
             }
 
-            if let Ok(Object::Blob(blob)) = store.read_object(&oid) {
-                fs::write(&full_path, &blob.data)?;
-            }
-
-            if let Ok(meta) = fs::metadata(&full_path) {
-                let entry = IndexEntry::from_fs_metadata(path, oid, &meta, 0);
-                index.add_entry(entry);
-            }
+            let blob = match store
+                .read_object(&oid)
+                .map_err(|e| TuiError::Terminal(e.to_string()))?
+            {
+                Object::Blob(blob) => blob,
+                _ => {
+                    return Err(TuiError::Terminal(format!(
+                        "checkout expected blob for '{}'",
+                        path
+                    )))
+                }
+            };
+            fs::write(&full_path, &blob.data)?;
+            let meta = fs::metadata(&full_path)?;
+            let entry = IndexEntry::from_fs_metadata(path, oid, &meta, 0);
+            index.add_entry(entry);
         }
     }
 
@@ -1152,23 +1238,32 @@ pub fn apply_stash(
     // Preflight 3rd parent untracked files: ensure none collide with existing files having different contents
     if stash_commit.parents.len() >= 3 {
         let untracked_oid = &stash_commit.parents[2];
-        if let Ok(Object::Commit(u_commit)) = store.read_object(untracked_oid) {
-            if let Ok(untracked_files) = flatten_tree(&store, &u_commit.tree, "") {
-                for (p, (_, blob_oid)) in &untracked_files {
-                    let full = oxidize_core::safe_join(repo_root, p)
-                        .map_err(|e| TuiError::Terminal(e.to_string()))?;
-                    if full.exists() {
-                        let existing_bytes = fs::read(&full)?;
-                        let (_, untracked_bytes) = store
-                            .read_raw(blob_oid)
-                            .map_err(|e| TuiError::Terminal(e.to_string()))?;
-                        if existing_bytes != untracked_bytes {
-                            return Err(TuiError::Terminal(format!(
-                                "Untracked working tree file '{}' would be overwritten by merge",
-                                p
-                            )));
-                        }
-                    }
+        let u_commit = match store
+            .read_object(untracked_oid)
+            .map_err(|e| TuiError::Terminal(e.to_string()))?
+        {
+            Object::Commit(commit) => commit,
+            _ => {
+                return Err(TuiError::Terminal(
+                    "stash untracked parent is not a commit".to_string(),
+                ))
+            }
+        };
+        let untracked_files = flatten_tree(&store, &u_commit.tree, "")
+            .map_err(|e| TuiError::Terminal(e.to_string()))?;
+        for (path, (_, blob_oid)) in &untracked_files {
+            let full = oxidize_core::safe_join(repo_root, path)
+                .map_err(|e| TuiError::Terminal(e.to_string()))?;
+            if full.exists() {
+                let existing_bytes = fs::read(&full)?;
+                let (_, untracked_bytes) = store
+                    .read_raw(blob_oid)
+                    .map_err(|e| TuiError::Terminal(e.to_string()))?;
+                if existing_bytes != untracked_bytes {
+                    return Err(TuiError::Terminal(format!(
+                        "Untracked working tree file '{}' would be overwritten by merge",
+                        path
+                    )));
                 }
             }
         }
@@ -1276,7 +1371,7 @@ pub fn apply_stash(
                     if current_bytes == base_bytes
                         || bytes_equal_ignoring_crlf(&current_bytes, &base_bytes)
                     {
-                        let _ = fs::remove_file(&full_path);
+                        fs::remove_file(&full_path)?;
                         index.remove_entry(&path);
                     } else {
                         has_conflicts = true;
@@ -1428,20 +1523,29 @@ pub fn apply_stash(
     // Restore untracked files if present in 3rd parent commit
     if stash_commit.parents.len() >= 3 {
         let untracked_oid = &stash_commit.parents[2];
-        if let Ok(Object::Commit(u_commit)) = store.read_object(untracked_oid) {
-            if let Ok(untracked_files) = flatten_tree(&store, &u_commit.tree, "") {
-                for (p, (_, blob_oid)) in untracked_files {
-                    let full = oxidize_core::safe_join(repo_root, &p)
-                        .map_err(|e| TuiError::Terminal(e.to_string()))?;
-                    let (_, data) = store
-                        .read_raw(&blob_oid)
-                        .map_err(|e| TuiError::Terminal(e.to_string()))?;
-                    if let Some(parent) = full.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    fs::write(&full, &data)?;
-                }
+        let u_commit = match store
+            .read_object(untracked_oid)
+            .map_err(|e| TuiError::Terminal(e.to_string()))?
+        {
+            Object::Commit(commit) => commit,
+            _ => {
+                return Err(TuiError::Terminal(
+                    "stash untracked parent is not a commit".to_string(),
+                ))
             }
+        };
+        let untracked_files = flatten_tree(&store, &u_commit.tree, "")
+            .map_err(|e| TuiError::Terminal(e.to_string()))?;
+        for (path, (_, blob_oid)) in untracked_files {
+            let full = oxidize_core::safe_join(repo_root, &path)
+                .map_err(|e| TuiError::Terminal(e.to_string()))?;
+            let (_, data) = store
+                .read_raw(&blob_oid)
+                .map_err(|e| TuiError::Terminal(e.to_string()))?;
+            if let Some(parent) = full.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&full, &data)?;
         }
     }
 
@@ -1502,7 +1606,8 @@ pub fn stash_save_with_options(
     let status = oxidize_index::compute_status(repo_root, &index, Some(&head_commit.tree), &store)
         .map_err(|e| TuiError::Terminal(e.to_string()))?;
 
-    let gitignore = oxidize_config::GitIgnore::load_from_dir(repo_root).unwrap_or_default();
+    let gitignore = oxidize_config::GitIgnore::load_from_dir(repo_root)
+        .map_err(|e| TuiError::Terminal(e.to_string()))?;
     let mut untracked_files = Vec::new();
     if opts.include_untracked {
         let mut all_files = Vec::new();
@@ -1559,19 +1664,13 @@ pub fn stash_save_with_options(
             match change {
                 oxidize_index::UnstagedChange::Modified(p) => {
                     let full = repo_root.join(p);
-                    if let Ok(data) = fs::read(&full) {
-                        let blob = Object::Blob(Blob::new(data));
-                        if let Ok(oid) = loose_store.write_object(&blob) {
-                            if let Ok(meta) = fs::metadata(&full) {
-                                work_index.add_entry(IndexEntry::from_fs_metadata(
-                                    p.clone(),
-                                    oid,
-                                    &meta,
-                                    0,
-                                ));
-                            }
-                        }
-                    }
+                    let data = fs::read(&full)?;
+                    let blob = Object::Blob(Blob::new(data));
+                    let oid = loose_store
+                        .write_object(&blob)
+                        .map_err(|e| TuiError::Terminal(e.to_string()))?;
+                    let meta = fs::metadata(&full)?;
+                    work_index.add_entry(IndexEntry::from_fs_metadata(p.clone(), oid, &meta, 0));
                 }
                 oxidize_index::UnstagedChange::Deleted(p) => {
                     work_index.remove_entry(p);
@@ -1587,17 +1686,13 @@ pub fn stash_save_with_options(
         let mut untracked_index = Index::new();
         for p in &untracked_files {
             let full = repo_root.join(p);
-            if let (Ok(data), Ok(meta)) = (fs::read(&full), fs::metadata(&full)) {
-                let blob = Object::Blob(Blob::new(data));
-                if let Ok(oid) = loose_store.write_object(&blob) {
-                    untracked_index.add_entry(IndexEntry::from_fs_metadata(
-                        p.clone(),
-                        oid,
-                        &meta,
-                        0,
-                    ));
-                }
-            }
+            let data = fs::read(&full)?;
+            let meta = fs::metadata(&full)?;
+            let blob = Object::Blob(Blob::new(data));
+            let oid = loose_store
+                .write_object(&blob)
+                .map_err(|e| TuiError::Terminal(e.to_string()))?;
+            untracked_index.add_entry(IndexEntry::from_fs_metadata(p.clone(), oid, &meta, 0));
         }
         let untracked_tree_oid = write_tree(&untracked_index, &loose_store)
             .map_err(|e| TuiError::Terminal(e.to_string()))?;
@@ -1703,14 +1798,26 @@ pub fn stash_save_with_options(
             if !unstaged_paths.contains(p) {
                 let full = repo_root.join(p);
                 if let Some((_, head_blob_oid)) = head_files.get(p) {
-                    if let Ok(Object::Blob(blob)) = store.read_object(head_blob_oid) {
-                        if let Some(parent) = full.parent() {
-                            let _ = fs::create_dir_all(parent);
+                    let blob = match store
+                        .read_object(head_blob_oid)
+                        .map_err(|e| TuiError::Terminal(e.to_string()))?
+                    {
+                        Object::Blob(blob) => blob,
+                        _ => {
+                            return Err(TuiError::Terminal(format!(
+                                "stash restore expected blob for '{}'",
+                                p
+                            )))
                         }
-                        let _ = fs::write(&full, &blob.data);
+                    };
+                    if let Some(parent) = full.parent() {
+                        fs::create_dir_all(parent)?;
                     }
+                    fs::write(&full, &blob.data)?;
                 } else {
-                    let _ = fs::remove_file(&full);
+                    if full.exists() {
+                        fs::remove_file(&full)?;
+                    }
                 }
             }
         }
@@ -1724,12 +1831,13 @@ pub fn stash_save_with_options(
         // Checkout staged files to WT
         for entry in index.entries() {
             let full = repo_root.join(&entry.path);
-            if let Ok((_, data)) = store.read_raw(&entry.oid) {
-                if let Some(parent) = full.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                let _ = fs::write(&full, &data);
+            let (_, data) = store
+                .read_raw(&entry.oid)
+                .map_err(|e| TuiError::Terminal(e.to_string()))?;
+            if let Some(parent) = full.parent() {
+                fs::create_dir_all(parent)?;
             }
+            fs::write(&full, &data)?;
         }
     } else {
         // Standard stash: reset WT and index to HEAD
@@ -1737,7 +1845,9 @@ pub fn stash_save_with_options(
         if opts.include_untracked {
             for p in &untracked_files {
                 let full = repo_root.join(p);
-                let _ = fs::remove_file(&full);
+                if full.exists() {
+                    fs::remove_file(&full)?;
+                }
             }
         }
     }
@@ -1765,8 +1875,7 @@ pub fn push_to_remote_ext(
     force: bool,
     force_with_lease: Option<ObjectId>,
 ) -> Result<String, TuiError> {
-    let config_path = git_dir.join("config");
-    let config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+    let config = load_repo_config(git_dir)?;
 
     let remote_name = remote_opt.unwrap_or("origin");
     let url = config.get_remote_url(remote_name).ok_or_else(|| {
@@ -1915,7 +2024,14 @@ pub fn push_to_remote_ext(
 
         // Update local tracking branch
         let tracking_ref = format!("refs/remotes/{}/{}", remote_name, branch);
-        let _ = ref_store.update_ref(&tracking_ref, &local_oid, None, "update tracking ref");
+        ref_store
+            .update_ref(&tracking_ref, &local_oid, None, "update tracking ref")
+            .map_err(|e| {
+                TuiError::Terminal(format!(
+                    "remote push succeeded, but local tracking ref update failed: {}",
+                    e
+                ))
+            })?;
 
         Ok(format!("Pushed {} to {}", branch, remote_name))
     } else {
@@ -1941,7 +2057,14 @@ pub fn push_to_remote_ext(
         }
 
         let tracking_ref = format!("refs/remotes/{}/{}", remote_name, branch);
-        let _ = ref_store.update_ref(&tracking_ref, &local_oid, None, "update tracking ref");
+        ref_store
+            .update_ref(&tracking_ref, &local_oid, None, "update tracking ref")
+            .map_err(|e| {
+                TuiError::Terminal(format!(
+                    "remote push succeeded, but local tracking ref update failed: {}",
+                    e
+                ))
+            })?;
 
         Ok(format!("Pushed {} to {}", branch, remote_name))
     }
@@ -1953,8 +2076,7 @@ pub fn push_tag_to_remote(
     remote_opt: Option<&str>,
     tag_name: &str,
 ) -> Result<String, TuiError> {
-    let config_path = git_dir.join("config");
-    let config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+    let config = load_repo_config(git_dir)?;
     let remote_name = remote_opt.unwrap_or("origin");
     let url = config
         .get_remote_url(remote_name)
@@ -2061,8 +2183,7 @@ pub fn delete_remote_branch(
     remote_opt: Option<&str>,
     branch_name: &str,
 ) -> Result<String, TuiError> {
-    let config_path = git_dir.join("config");
-    let config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+    let config = load_repo_config(git_dir)?;
     let remote_name = remote_opt.unwrap_or("origin");
     let url = config
         .get_remote_url(remote_name)
@@ -2108,7 +2229,12 @@ pub fn delete_remote_branch(
             dest_path.clone()
         };
         let dest_ref_store = RefStore::new(&dest_git_dir);
-        let _ = dest_ref_store.delete_branch(branch_name);
+        dest_ref_store.delete_branch(branch_name).map_err(|e| {
+            TuiError::Terminal(format!(
+                "failed to delete branch '{}' on local remote '{}': {}",
+                branch_name, remote_name, e
+            ))
+        })?;
     } else {
         let updates = [(&remote_old_oid, &ObjectId::ZERO, target_ref_name.as_str())];
         let report = if is_ssh {
@@ -2132,7 +2258,15 @@ pub fn delete_remote_branch(
 
     // Clean up local tracking branch
     let tracking_ref = format!("refs/remotes/{}/{}", remote_name, branch_name);
-    let _ = ref_store.delete_ref(&tracking_ref);
+    match ref_store.delete_ref(&tracking_ref) {
+        Ok(()) | Err(RefError::NotFound(_)) => {}
+        Err(e) => {
+            return Err(TuiError::Terminal(format!(
+                "remote branch deletion succeeded, but local tracking ref '{}' could not be removed: {}",
+                tracking_ref, e
+            )))
+        }
+    }
 
     Ok(format!(
         "Deleted remote branch '{}/{}'",
@@ -2142,8 +2276,7 @@ pub fn delete_remote_branch(
 
 /// Fetches from all configured remotes with optional prune of stale tracking branches.
 pub fn fetch_all_remotes(git_dir: &Path, prune: bool) -> Result<String, TuiError> {
-    let config_path = git_dir.join("config");
-    let config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+    let config = load_repo_config(git_dir)?;
     let remotes = config.list_remotes();
     if remotes.is_empty() {
         return Ok("No remotes configured".to_string());
@@ -2153,10 +2286,8 @@ pub fn fetch_all_remotes(git_dir: &Path, prune: bool) -> Result<String, TuiError
     let ref_store = RefStore::new(git_dir);
 
     for (name, _) in &remotes {
-        match fetch_from_remote(git_dir, Some(name)) {
-            Ok(msg) => messages.push(format!("{}: {}", name, msg)),
-            Err(e) => messages.push(format!("{}: {}", name, e)),
-        }
+        let msg = fetch_from_remote(git_dir, Some(name))?;
+        messages.push(format!("{}: {}", name, msg));
 
         if prune {
             if let Some(url) = config.get_remote_url(name) {
@@ -2172,25 +2303,35 @@ pub fn fetch_all_remotes(git_dir: &Path, prune: bool) -> Result<String, TuiError
                         .map(|(r, _, _)| r)
                 };
 
-                if let Ok(remote_refs) = remote_refs_res {
-                    let remote_branches: HashSet<String> = remote_refs
-                        .iter()
-                        .filter_map(|r| r.name.strip_prefix("refs/heads/").map(|s| s.to_string()))
-                        .collect();
+                let remote_refs = remote_refs_res.map_err(|e| {
+                    TuiError::Terminal(format!(
+                        "fetch from '{}' succeeded, but prune discovery failed: {}",
+                        name, e
+                    ))
+                })?;
+                let remote_branches: HashSet<String> = remote_refs
+                    .iter()
+                    .filter_map(|r| r.name.strip_prefix("refs/heads/").map(|s| s.to_string()))
+                    .collect();
 
-                    let prefix = format!("{}/", name);
-                    if let Ok(tracking_refs) = ref_store.list_remotes() {
-                        for (tracking_branch, _oid) in tracking_refs {
-                            if let Some(remote_branch) = tracking_branch.strip_prefix(&prefix) {
-                                if !remote_branches.contains(remote_branch) {
-                                    let full_ref = format!("refs/remotes/{}", tracking_branch);
-                                    let _ = ref_store.delete_ref(&full_ref);
-                                    messages.push(format!(
-                                        "Pruned tracking branch {}",
-                                        tracking_branch
-                                    ));
-                                }
-                            }
+                let prefix = format!("{}/", name);
+                let tracking_refs = ref_store.list_remotes().map_err(|e| {
+                    TuiError::Terminal(format!(
+                        "fetch from '{}' succeeded, but local tracking refs could not be listed for pruning: {}",
+                        name, e
+                    ))
+                })?;
+                for (tracking_branch, _oid) in tracking_refs {
+                    if let Some(remote_branch) = tracking_branch.strip_prefix(&prefix) {
+                        if !remote_branches.contains(remote_branch) {
+                            let full_ref = format!("refs/remotes/{}", tracking_branch);
+                            ref_store.delete_ref(&full_ref).map_err(|e| {
+                                TuiError::Terminal(format!(
+                                    "fetch from '{}' succeeded, but stale tracking ref '{}' could not be pruned: {}",
+                                    name, full_ref, e
+                                ))
+                            })?;
+                            messages.push(format!("Pruned tracking branch {}", tracking_branch));
                         }
                     }
                 }
@@ -2204,7 +2345,13 @@ pub fn fetch_all_remotes(git_dir: &Path, prune: bool) -> Result<String, TuiError
 /// Adds a remote to git configuration.
 pub fn add_remote(git_dir: &Path, name: &str, url: &str) -> Result<(), TuiError> {
     let config_path = git_dir.join("config");
-    let mut config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+    let mut config = load_repo_config(git_dir)?;
+    if config.get_remote_url(name).is_some() {
+        return Err(TuiError::Terminal(format!(
+            "Remote '{}' already exists",
+            name
+        )));
+    }
     config.add_remote(name, url);
     config
         .save_to_file(&config_path)
@@ -2214,21 +2361,25 @@ pub fn add_remote(git_dir: &Path, name: &str, url: &str) -> Result<(), TuiError>
 /// Removes a remote from git configuration and cleans up its tracking branches.
 pub fn remove_remote(git_dir: &Path, name: &str) -> Result<(), TuiError> {
     let config_path = git_dir.join("config");
-    let mut config = GitConfig::load_from_file(&config_path).unwrap_or_default();
-    config.remove_remote(name);
+    let mut config = load_repo_config(git_dir)?;
+    let original = fs::read(&config_path)?;
+    if !config.remove_remote(name) {
+        return Err(TuiError::Terminal(format!("Remote '{}' not found", name)));
+    }
     config
         .save_to_file(&config_path)
         .map_err(|e| TuiError::Terminal(e.to_string()))?;
 
     let ref_store = RefStore::new(git_dir);
-    let prefix = format!("{}/", name);
-    if let Ok(tracking_refs) = ref_store.list_remotes() {
-        for (tracking_branch, _oid) in tracking_refs {
-            if tracking_branch.starts_with(&prefix) {
-                let full_ref = format!("refs/remotes/{}", tracking_branch);
-                let _ = ref_store.delete_ref(&full_ref);
-            }
-        }
+    if let Err(error) = ref_store.remove_remote_refs(name) {
+        return Err(rollback_config(
+            &config_path,
+            &original,
+            format!(
+                "failed to remove tracking refs for remote '{}': {}",
+                name, error
+            ),
+        ));
     }
     Ok(())
 }
@@ -2236,30 +2387,49 @@ pub fn remove_remote(git_dir: &Path, name: &str) -> Result<(), TuiError> {
 /// Renames a remote in git configuration.
 pub fn rename_remote(git_dir: &Path, old_name: &str, new_name: &str) -> Result<(), TuiError> {
     let config_path = git_dir.join("config");
-    let mut config = GitConfig::load_from_file(&config_path).unwrap_or_default();
-    let url = config
-        .get_remote_url(old_name)
-        .ok_or_else(|| TuiError::Terminal(format!("Remote '{}' not found", old_name)))?
-        .to_string();
-
-    config.remove_remote(old_name);
-    config.add_remote(new_name, &url);
+    let mut config = load_repo_config(git_dir)?;
+    let original = fs::read(&config_path)?;
+    if config.get_remote_url(new_name).is_some() {
+        return Err(TuiError::Terminal(format!(
+            "Remote '{}' already exists",
+            new_name
+        )));
+    }
+    if !config
+        .rename_subsection("remote", old_name, new_name)
+        .map_err(|e| TuiError::Terminal(e.to_string()))?
+    {
+        return Err(TuiError::Terminal(format!(
+            "Remote '{}' not found",
+            old_name
+        )));
+    }
+    config.replace_in_values(
+        "remote",
+        Some(new_name),
+        "fetch",
+        &format!("refs/remotes/{}/", old_name),
+        &format!("refs/remotes/{}/", new_name),
+    );
+    for branch in config.subsections("branch") {
+        if config.get("branch", Some(&branch), "remote") == Some(old_name) {
+            config.set("branch", Some(&branch), "remote", new_name);
+        }
+    }
     config
         .save_to_file(&config_path)
         .map_err(|e| TuiError::Terminal(e.to_string()))?;
 
     let ref_store = RefStore::new(git_dir);
-    let old_prefix = format!("{}/", old_name);
-    let new_prefix = format!("{}/", new_name);
-    if let Ok(remotes) = ref_store.list_remotes() {
-        for (remote_branch, oid) in remotes {
-            if let Some(rest) = remote_branch.strip_prefix(&old_prefix) {
-                let new_ref = format!("refs/remotes/{}{}", new_prefix, rest);
-                let old_ref = format!("refs/remotes/{}", remote_branch);
-                let _ = ref_store.update_ref(&new_ref, &oid, None, "rename remote");
-                let _ = ref_store.delete_ref(&old_ref);
-            }
-        }
+    if let Err(error) = ref_store.rename_remote_refs(old_name, new_name) {
+        return Err(rollback_config(
+            &config_path,
+            &original,
+            format!(
+                "failed to rename tracking refs from '{}' to '{}': {}",
+                old_name, new_name, error
+            ),
+        ));
     }
     Ok(())
 }
@@ -2368,8 +2538,7 @@ pub fn get_provider_urls(
 
 /// Fetches objects and updates tracking refs from remote repository.
 pub fn fetch_from_remote(git_dir: &Path, remote_opt: Option<&str>) -> Result<String, TuiError> {
-    let config_path = git_dir.join("config");
-    let config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+    let config = load_repo_config(git_dir)?;
 
     let remote_name = remote_opt.unwrap_or("origin");
     let url = config
@@ -2402,7 +2571,16 @@ pub fn fetch_from_remote(git_dir: &Path, remote_opt: Option<&str>) -> Result<Str
     for r in &remote_refs {
         if let Some(branch) = r.name.strip_prefix("refs/heads/") {
             let tracking_ref = format!("refs/remotes/{}/{}", remote_name, branch);
-            let local_tracking_oid = ref_store.read_ref(&tracking_ref).ok();
+            let local_tracking_oid = match ref_store.read_ref(&tracking_ref) {
+                Ok(oid) => Some(oid),
+                Err(RefError::NotFound(_)) => None,
+                Err(e) => {
+                    return Err(TuiError::Terminal(format!(
+                        "cannot read local tracking ref '{}': {}",
+                        tracking_ref, e
+                    )))
+                }
+            };
             if local_tracking_oid != Some(r.oid) {
                 wants.push(r.oid);
                 updated_refs.push((tracking_ref, r.oid));
@@ -2443,7 +2621,14 @@ pub fn fetch_from_remote(git_dir: &Path, remote_opt: Option<&str>) -> Result<Str
     }
 
     for (target_ref, oid) in &updated_refs {
-        let _ = ref_store.update_ref(target_ref, oid, None, "fetch: update tracking ref");
+        ref_store
+            .update_ref(target_ref, oid, None, "fetch: update tracking ref")
+            .map_err(|e| {
+                TuiError::Terminal(format!(
+                    "fetch completed, but tracking ref '{}' could not be updated: {}",
+                    target_ref, e
+                ))
+            })?;
     }
 
     Ok(format!(
@@ -2547,22 +2732,38 @@ pub fn rename_branch(
     old_name: &str,
     new_name: &str,
 ) -> Result<(), TuiError> {
-    let ref_store = RefStore::with_common_dir(git_dir, common_dir);
-    ref_store
-        .rename_branch(old_name, new_name)
-        .map_err(|e| TuiError::Terminal(e.to_string()))?;
-
-    // If config has [branch "<old_name>"], update it to [branch "<new_name>"]
     let config_path = common_dir.join("config");
-    if config_path.is_file() {
-        if let Ok(content) = fs::read_to_string(&config_path) {
-            let old_section = format!("[branch \"{}\"]", old_name);
-            let new_section = format!("[branch \"{}\"]", new_name);
-            if content.contains(&old_section) {
-                let updated = content.replace(&old_section, &new_section);
-                let _ = fs::write(&config_path, updated);
+    let mut config = GitConfig::load_from_file(&config_path)
+        .map_err(|e| TuiError::Terminal(format!("cannot read repository config: {}", e)))?;
+    let original_config = if config_path.exists() {
+        Some(fs::read(&config_path)?)
+    } else {
+        None
+    };
+    let config_changed = config
+        .rename_subsection("branch", old_name, new_name)
+        .map_err(|e| TuiError::Terminal(e.to_string()))?;
+    if config_changed {
+        config.save_to_file(&config_path).map_err(|e| {
+            TuiError::Terminal(format!("cannot update branch configuration: {}", e))
+        })?;
+    }
+
+    let ref_store = RefStore::with_common_dir(git_dir, common_dir);
+    if let Err(error) = ref_store.rename_branch(old_name, new_name) {
+        if config_changed {
+            if let Some(original_config) = original_config.as_deref() {
+                return Err(rollback_config(
+                    &config_path,
+                    original_config,
+                    format!("failed to rename branch refs: {}", error),
+                ));
             }
         }
+        return Err(TuiError::Terminal(format!(
+            "failed to rename branch refs: {}",
+            error
+        )));
     }
 
     Ok(())
@@ -2661,7 +2862,14 @@ pub fn checkout_commit(
 
     let sig = get_signature(git_dir);
     let msg = format!("checkout: moving to {}", target_oid);
-    let _ = ref_store.append_reflog("HEAD", target_oid, target_oid, &sig, &msg);
+    ref_store
+        .append_reflog("HEAD", target_oid, target_oid, &sig, &msg)
+        .map_err(|e| {
+            TuiError::Terminal(format!(
+                "checkout completed, but HEAD reflog update failed: {}",
+                e
+            ))
+        })?;
 
     Ok(())
 }
@@ -2710,12 +2918,19 @@ pub fn cherry_pick_commit(
         }
     };
 
-    let base_files = if !target_commit.parents.is_empty() {
-        if let Ok(Object::Commit(p_commit)) = store.read_object(&target_commit.parents[0]) {
-            flatten_tree(&store, &p_commit.tree, "").unwrap_or_default()
-        } else {
-            BTreeMap::new()
-        }
+    let base_files = if let Some(parent_oid) = target_commit.parents.first() {
+        let parent = match store
+            .read_object(parent_oid)
+            .map_err(|e| TuiError::Terminal(e.to_string()))?
+        {
+            Object::Commit(commit) => commit,
+            _ => {
+                return Err(TuiError::Terminal(
+                    "cherry-pick parent is not a commit".to_string(),
+                ))
+            }
+        };
+        flatten_tree(&store, &parent.tree, "").map_err(|e| TuiError::Terminal(e.to_string()))?
     } else {
         BTreeMap::new()
     };
@@ -2754,7 +2969,7 @@ pub fn cherry_pick_commit(
             if let Some(&(_their_mode, their_blob_oid)) = their_entry {
                 let full_path = repo_root.join(&path);
                 if let Some(parent) = full_path.parent() {
-                    let _ = fs::create_dir_all(parent);
+                    fs::create_dir_all(parent)?;
                 }
                 let blob_data = store
                     .read_raw(&their_blob_oid)
@@ -2772,7 +2987,7 @@ pub fn cherry_pick_commit(
                 // File deleted in their commit
                 let full_path = repo_root.join(&path);
                 if full_path.exists() {
-                    let _ = fs::remove_file(&full_path);
+                    fs::remove_file(&full_path)?;
                 }
                 index.remove_entry(&path);
             }
@@ -2785,15 +3000,20 @@ pub fn cherry_pick_commit(
         }
 
         // Three-way merge needed
-        let base_text = base_entry
-            .map(|(_, id)| read_blob_text(&store, id))
-            .unwrap_or_default();
-        let our_text = our_entry
-            .map(|(_, id)| read_blob_text(&store, id))
-            .unwrap_or_default();
-        let their_text = their_entry
-            .map(|(_, id)| read_blob_text(&store, id))
-            .unwrap_or_default();
+        let read_text = |entry: Option<&(oxidize_core::object::FileMode, ObjectId)>| {
+            entry
+                .map(|(_, id)| {
+                    store
+                        .read_raw(id)
+                        .map(|(_, data)| String::from_utf8_lossy(&data).into_owned())
+                        .map_err(|e| TuiError::Terminal(e.to_string()))
+                })
+                .transpose()
+                .map(|text| text.unwrap_or_default())
+        };
+        let base_text = read_text(base_entry)?;
+        let our_text = read_text(our_entry)?;
+        let their_text = read_text(their_entry)?;
 
         let merged = three_way_merge(
             &base_text,
@@ -2804,7 +3024,7 @@ pub fn cherry_pick_commit(
         );
         let full_path = repo_root.join(&path);
         if let Some(parent) = full_path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)?;
         }
         fs::write(&full_path, merged.content.as_bytes())?;
 
@@ -2812,15 +3032,14 @@ pub fn cherry_pick_commit(
             .write_object(&Object::Blob(Blob::new(merged.content.into_bytes())))
             .map_err(|e| TuiError::Terminal(e.to_string()))?;
 
-        if let Ok(meta) = fs::metadata(&full_path) {
-            let stage = if merged.has_conflicts { 1 } else { 0 };
-            index.add_entry(IndexEntry::from_fs_metadata(
-                path.clone(),
-                blob_oid,
-                &meta,
-                stage,
-            ));
-        }
+        let meta = fs::metadata(&full_path)?;
+        let stage = if merged.has_conflicts { 1 } else { 0 };
+        index.add_entry(IndexEntry::from_fs_metadata(
+            path.clone(),
+            blob_oid,
+            &meta,
+            stage,
+        ));
 
         if merged.has_conflicts {
             had_conflicts = true;
@@ -2953,7 +3172,13 @@ pub fn reset_to_commit(
     }
 
     let sig = get_signature(git_dir);
-    let _ = ref_store.append_reflog("HEAD", &old_head, target_oid, &sig, &ref_msg);
+    ref_store
+        .append_reflog("HEAD", &old_head, target_oid, &sig, &ref_msg)
+        .map_err(|e| {
+            TuiError::Terminal(format!(
+                "reset completed, but HEAD reflog update failed: {e}"
+            ))
+        })?;
 
     Ok(())
 }
@@ -3058,16 +3283,26 @@ pub fn merge_trees_into_index_and_worktree(
             };
             if let Some((their_mode, their_blob_oid)) = their_entry {
                 if let Some(parent) = full_path.parent() {
-                    let _ = fs::create_dir_all(parent);
+                    fs::create_dir_all(parent)?;
                 }
-                if let Ok(Object::Blob(blob)) = store.read_object(their_blob_oid) {
-                    fs::write(&full_path, &blob.data)?;
-                }
-                let meta = fs::metadata(&full_path).ok();
-                let file_size = meta.as_ref().map(|m| m.len() as u32).unwrap_or(0);
+                let blob = match store
+                    .read_object(their_blob_oid)
+                    .map_err(|e| TuiError::Terminal(e.to_string()))?
+                {
+                    Object::Blob(blob) => blob,
+                    _ => {
+                        return Err(TuiError::Terminal(format!(
+                            "merge expected blob for '{}'",
+                            path
+                        )))
+                    }
+                };
+                fs::write(&full_path, &blob.data)?;
+                let meta = fs::metadata(&full_path)?;
+                let file_size = meta.len() as u32;
                 let mtime = meta
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
+                    .modified()
+                    .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as u32)
                     .unwrap_or(0);
@@ -3079,7 +3314,7 @@ pub fn merge_trees_into_index_and_worktree(
             } else {
                 // Deleted in their branch
                 if full_path.exists() {
-                    let _ = fs::remove_file(&full_path);
+                    fs::remove_file(&full_path)?;
                 }
                 index.remove_entry(&path);
             }
@@ -3167,11 +3402,11 @@ pub fn merge_trees_into_index_and_worktree(
             // Preserve raw our bytes in the worktree if present
             if let Some(ref data) = our_raw {
                 if let Some(parent) = full_path.parent() {
-                    let _ = fs::create_dir_all(parent);
+                    fs::create_dir_all(parent)?;
                 }
                 fs::write(&full_path, data)?;
             } else if full_path.exists() {
-                let _ = fs::remove_file(&full_path);
+                fs::remove_file(&full_path)?;
             }
             continue;
         }
@@ -3183,7 +3418,7 @@ pub fn merge_trees_into_index_and_worktree(
         let merged = three_way_merge(base_text, our_text, their_text, our_label, their_label);
 
         if let Some(parent) = full_path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)?;
         }
         fs::write(&full_path, merged.content.as_bytes())?;
 
@@ -3209,11 +3444,11 @@ pub fn merge_trees_into_index_and_worktree(
             let blob_oid = loose_store
                 .write_object(&Object::Blob(Blob::new(merged.content.into_bytes())))
                 .map_err(|e| TuiError::Terminal(e.to_string()))?;
-            let meta = fs::metadata(&full_path).ok();
-            let file_size = meta.as_ref().map(|m| m.len() as u32).unwrap_or(0);
+            let meta = fs::metadata(&full_path)?;
+            let file_size = meta.len() as u32;
             let mtime = meta
-                .as_ref()
-                .and_then(|m| m.modified().ok())
+                .modified()
+                .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as u32)
                 .unwrap_or(0);
@@ -3303,11 +3538,11 @@ pub fn start_interactive_rebase(
 
     // Reset working tree and index to onto commit tree with collision checks
     if let Err(e) = checkout_tree_and_update_index(repo_root, git_dir, &onto_commit.tree, false) {
-        let _ = fs::remove_dir_all(git_dir.join("rebase-merge"));
+        remove_dir_all_if_exists(&git_dir.join("rebase-merge"))?;
         return Err(e);
     }
     if let Err(e) = ref_store.set_head_detached(onto) {
-        let _ = fs::remove_dir_all(git_dir.join("rebase-merge"));
+        remove_dir_all_if_exists(&git_dir.join("rebase-merge"))?;
         return Err(TuiError::Terminal(e.to_string()));
     }
 
@@ -3802,19 +4037,17 @@ pub fn resolve_conflict_choice(
                 _ => return Err(TuiError::Terminal("Not a blob".to_string())),
             };
             if let Some(parent) = full_path.parent() {
-                let _ = fs::create_dir_all(parent);
+                fs::create_dir_all(parent)?;
             }
             fs::write(&full_path, &blob_data)?;
-            let meta = fs::metadata(&full_path).ok();
+            let meta = fs::metadata(&full_path)?;
             let mut entry = IndexEntry::new(rel_path.to_string(), e.oid, e.mode);
-            if let Some(m) = meta {
-                entry.file_size = m.len() as u32;
-                if let Ok(mtime) = m.modified().and_then(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .map_err(|_| std::io::Error::other("err"))
-                }) {
-                    entry.mtime_sec = mtime.as_secs() as u32;
-                }
+            entry.file_size = meta.len() as u32;
+            if let Ok(mtime) = meta.modified().and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| std::io::Error::other("err"))
+            }) {
+                entry.mtime_sec = mtime.as_secs() as u32;
             }
             entry.stage = 0;
             index.add_entry(entry);
@@ -3831,19 +4064,17 @@ pub fn resolve_conflict_choice(
                 _ => return Err(TuiError::Terminal("Not a blob".to_string())),
             };
             if let Some(parent) = full_path.parent() {
-                let _ = fs::create_dir_all(parent);
+                fs::create_dir_all(parent)?;
             }
             fs::write(&full_path, &blob_data)?;
-            let meta = fs::metadata(&full_path).ok();
+            let meta = fs::metadata(&full_path)?;
             let mut entry = IndexEntry::new(rel_path.to_string(), e.oid, e.mode);
-            if let Some(m) = meta {
-                entry.file_size = m.len() as u32;
-                if let Ok(mtime) = m.modified().and_then(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .map_err(|_| std::io::Error::other("err"))
-                }) {
-                    entry.mtime_sec = mtime.as_secs() as u32;
-                }
+            entry.file_size = meta.len() as u32;
+            if let Ok(mtime) = meta.modified().and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| std::io::Error::other("err"))
+            }) {
+                entry.mtime_sec = mtime.as_secs() as u32;
             }
             entry.stage = 0;
             index.add_entry(entry);
@@ -3878,7 +4109,7 @@ pub fn resolve_conflict_choice(
             combined.extend_from_slice(&d3);
 
             if let Some(parent) = full_path.parent() {
-                let _ = fs::create_dir_all(parent);
+                fs::create_dir_all(parent)?;
             }
             fs::write(&full_path, &combined)?;
 
@@ -4503,31 +4734,31 @@ pub fn create_worktree(
 
     for (rel_path, (mode, blob_oid)) in tree_files {
         let full = abs_wt.join(&rel_path);
-        if let Ok((_, data)) = store.read_raw(&blob_oid) {
-            if let Some(parent) = full.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let _ = fs::write(&full, &data);
-            let meta = fs::metadata(&full).ok();
-            let file_size = meta.as_ref().map(|m| m.len() as u32).unwrap_or(0);
-            let entry = IndexEntry {
-                ctime_sec: 0,
-                ctime_nsec: 0,
-                mtime_sec: 0,
-                mtime_nsec: 0,
-                dev: 0,
-                ino: 0,
-                mode: mode.0,
-                uid: 0,
-                gid: 0,
-                file_size,
-                oid: blob_oid,
-                stage: 0,
-                assume_valid: false,
-                path: rel_path,
-            };
-            wt_index.add_entry(entry);
+        let (_, data) = store
+            .read_raw(&blob_oid)
+            .map_err(|e| TuiError::Terminal(e.to_string()))?;
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent)?;
         }
+        fs::write(&full, &data)?;
+        let meta = fs::metadata(&full)?;
+        let entry = IndexEntry {
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            dev: 0,
+            ino: 0,
+            mode: mode.0,
+            uid: 0,
+            gid: 0,
+            file_size: meta.len() as u32,
+            oid: blob_oid,
+            stage: 0,
+            assume_valid: false,
+            path: rel_path,
+        };
+        wt_index.add_entry(entry);
     }
 
     wt_index
@@ -4557,103 +4788,159 @@ pub fn remove_worktree(common_dir: &Path, wt_name: &str, force: bool) -> Result<
     }
 
     let lock_file = wt_admin_dir.join("locked");
-    if lock_file.is_file() && !force {
-        let reason = fs::read_to_string(&lock_file).unwrap_or_default();
-        return Err(TuiError::Terminal(format!(
-            "worktree '{}' is locked: {}",
-            wt_name,
-            reason.trim()
-        )));
+    if lock_file.exists() {
+        if !lock_file.is_file() {
+            return Err(TuiError::Terminal(format!(
+                "worktree '{}' has malformed lock metadata",
+                wt_name
+            )));
+        }
+        let reason = fs::read_to_string(&lock_file)?;
+        if !force {
+            return Err(TuiError::Terminal(format!(
+                "worktree '{}' is locked: {}",
+                wt_name,
+                reason.trim()
+            )));
+        }
     }
 
     let gitdir_path = wt_admin_dir.join("gitdir");
+    if !gitdir_path.is_file() {
+        return Err(TuiError::Terminal(format!(
+            "worktree '{}' is missing required gitdir metadata",
+            wt_name
+        )));
+    }
     let content = fs::read_to_string(&gitdir_path)
         .map_err(|e| TuiError::Terminal(format!("cannot read worktree gitdir: {}", e)))?;
-    let p = std::path::PathBuf::from(content.trim());
-    let wt_path = if p.file_name().is_some_and(|f| f == ".git") {
-        p.parent().unwrap_or(&p).to_path_buf()
-    } else {
-        p.clone()
-    };
+    let raw_git_path = content.trim();
+    if raw_git_path.is_empty() {
+        return Err(TuiError::Terminal(format!(
+            "worktree '{}' has empty gitdir metadata",
+            wt_name
+        )));
+    }
+    let git_link = std::path::PathBuf::from(raw_git_path);
+    if git_link.file_name().is_none_or(|name| name != ".git") {
+        return Err(TuiError::Terminal(format!(
+            "worktree '{}' gitdir metadata does not point to a .git file",
+            wt_name
+        )));
+    }
+    let wt_path = git_link
+        .parent()
+        .ok_or_else(|| TuiError::Terminal("worktree gitdir has no parent".to_string()))?
+        .to_path_buf();
+    if !wt_path.is_dir() {
+        return Err(TuiError::Terminal(format!(
+            "worktree directory '{}' is missing or unreadable",
+            wt_path.display()
+        )));
+    }
 
-    // Protect main repository or current working directory
-    let main_repo_root = if common_dir.file_name().is_some_and(|n| n == ".git") {
-        common_dir.parent().unwrap_or(common_dir)
+    let main_repo_root = if common_dir.file_name().is_some_and(|name| name == ".git") {
+        common_dir
+            .parent()
+            .ok_or_else(|| TuiError::Terminal("common git directory has no parent".to_string()))?
     } else {
         common_dir
     };
-    if let (Ok(can_wt), Ok(can_main)) = (wt_path.canonicalize(), main_repo_root.canonicalize()) {
-        if can_wt == can_main {
-            return Err(TuiError::Terminal(
-                "cannot remove main worktree".to_string(),
-            ));
-        }
+    let can_wt = wt_path.canonicalize()?;
+    let can_main = main_repo_root.canonicalize()?;
+    if can_wt == can_main {
+        return Err(TuiError::Terminal(
+            "cannot remove main worktree".to_string(),
+        ));
     }
-    if let (Ok(can_wt), Ok(can_cwd)) = (
-        wt_path.canonicalize(),
-        std::env::current_dir().and_then(|c| c.canonicalize()),
-    ) {
-        if can_wt == can_cwd {
-            return Err(TuiError::Terminal(
-                "cannot remove current working directory worktree".to_string(),
-            ));
-        }
+    let can_cwd = std::env::current_dir()?.canonicalize()?;
+    if can_wt == can_cwd {
+        return Err(TuiError::Terminal(
+            "cannot remove current working directory worktree".to_string(),
+        ));
     }
 
-    // Validate reciprocal administrative paths: wt_path/.git must point back to wt_admin_dir
     let wt_dotgit = wt_path.join(".git");
-    if wt_dotgit.is_file() {
-        let dotgit_content = fs::read_to_string(&wt_dotgit).unwrap_or_default();
-        if let Some(target) = dotgit_content.strip_prefix("gitdir:") {
-            let target_path = std::path::PathBuf::from(target.trim());
-            let resolved_target = if target_path.is_relative() {
-                wt_path.join(target_path)
-            } else {
-                target_path
-            };
-            if let (Ok(c1), Ok(c2)) = (resolved_target.canonicalize(), wt_admin_dir.canonicalize())
-            {
-                if c1 != c2 {
-                    return Err(TuiError::Terminal(format!(
-                        "worktree '{}' has mismatched reciprocal administrative path",
-                        wt_name
-                    )));
-                }
-            }
-        }
+    if !wt_dotgit.is_file() {
+        return Err(TuiError::Terminal(format!(
+            "worktree '{}' is missing reciprocal .git link",
+            wt_name
+        )));
+    }
+    let dotgit_content = fs::read_to_string(&wt_dotgit)?;
+    let target = dotgit_content.strip_prefix("gitdir:").ok_or_else(|| {
+        TuiError::Terminal(format!(
+            "worktree '{}' has malformed reciprocal .git link",
+            wt_name
+        ))
+    })?;
+    let target_path = std::path::PathBuf::from(target.trim());
+    if target_path.as_os_str().is_empty() {
+        return Err(TuiError::Terminal(format!(
+            "worktree '{}' has empty reciprocal .git link",
+            wt_name
+        )));
+    }
+    let resolved_target = if target_path.is_relative() {
+        wt_path.join(target_path)
+    } else {
+        target_path
+    };
+    if resolved_target.canonicalize()? != wt_admin_dir.canonicalize()? {
+        return Err(TuiError::Terminal(format!(
+            "worktree '{}' has mismatched reciprocal administrative path",
+            wt_name
+        )));
     }
 
-    // Check dirtiness if not force
-    if !force && wt_path.exists() {
-        let wt_index_path = wt_admin_dir.join("index");
-        let wt_index = if wt_index_path.exists() {
-            Index::load_from(&wt_index_path).unwrap_or_default()
-        } else {
-            Index::default()
-        };
-
-        let wt_ref_store = RefStore::with_common_dir(&wt_admin_dir, common_dir);
-        let wt_store =
-            RepoObjectStore::open(common_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
-        let (_, wt_head_oid_opt) = wt_ref_store.resolve_head().unwrap_or((String::new(), None));
-        let wt_head_tree = wt_head_oid_opt.and_then(|oid| {
-            if let Ok(Object::Commit(c)) = wt_store.read_object(&oid) {
-                Some(c.tree)
-            } else {
-                None
+    let wt_index_path = wt_admin_dir.join("index");
+    if !wt_index_path.is_file() {
+        return Err(TuiError::Terminal(format!(
+            "worktree '{}' is missing required index",
+            wt_name
+        )));
+    }
+    let wt_index = Index::load_from(&wt_index_path)
+        .map_err(|e| TuiError::Terminal(format!("cannot read worktree index: {}", e)))?;
+    let head_path = wt_admin_dir.join("HEAD");
+    if !head_path.is_file() {
+        return Err(TuiError::Terminal(format!(
+            "worktree '{}' is missing required HEAD metadata",
+            wt_name
+        )));
+    }
+    let wt_ref_store = RefStore::with_common_dir(&wt_admin_dir, common_dir);
+    let (_, wt_head_oid_opt) = wt_ref_store
+        .resolve_head()
+        .map_err(|e| TuiError::Terminal(format!("cannot resolve worktree HEAD: {}", e)))?;
+    let wt_store =
+        RepoObjectStore::open(common_dir).map_err(|e| TuiError::Terminal(e.to_string()))?;
+    let wt_head_tree = match wt_head_oid_opt {
+        Some(oid) => match wt_store
+            .read_object(&oid)
+            .map_err(|e| TuiError::Terminal(format!("cannot read worktree HEAD commit: {}", e)))?
+        {
+            Object::Commit(commit) => Some(commit.tree),
+            _ => {
+                return Err(TuiError::Terminal(
+                    "worktree HEAD does not point to a commit".to_string(),
+                ))
             }
-        });
+        },
+        None => None,
+    };
 
-        let gitignore = oxidize_config::GitIgnore::load_from_dir(&wt_path).unwrap_or_default();
+    if !force {
+        let gitignore = oxidize_config::GitIgnore::load_from_dir(&wt_path)
+            .map_err(|e| TuiError::Terminal(e.to_string()))?;
         let status = oxidize_index::compute_status_with_ignore(
             &wt_path,
             &wt_index,
             wt_head_tree.as_ref(),
             &wt_store,
-            Some(&|p, is_dir| gitignore.is_ignored(p, is_dir)),
+            Some(&|path, is_dir| gitignore.is_ignored(path, is_dir)),
         )
         .map_err(|e| TuiError::Terminal(e.to_string()))?;
-
         if !status.staged.is_empty() || !status.unstaged.is_empty() || !status.untracked.is_empty()
         {
             return Err(TuiError::Terminal(format!(
@@ -4663,16 +4950,13 @@ pub fn remove_worktree(common_dir: &Path, wt_name: &str, force: bool) -> Result<
         }
     }
 
-    if wt_path.exists() {
-        fs::remove_dir_all(&wt_path).map_err(|e| {
-            TuiError::Terminal(format!(
-                "failed to remove worktree directory '{}': {}",
-                wt_path.display(),
-                e
-            ))
-        })?;
-    }
-
+    fs::remove_dir_all(&wt_path).map_err(|e| {
+        TuiError::Terminal(format!(
+            "failed to remove worktree directory '{}': {}",
+            wt_path.display(),
+            e
+        ))
+    })?;
     fs::remove_dir_all(&wt_admin_dir).map_err(|e| {
         TuiError::Terminal(format!(
             "failed to remove worktree metadata '{}': {}",
@@ -4803,7 +5087,8 @@ pub fn submodule_init(
     if !gitmodules_path.is_file() {
         return Err(TuiError::Terminal("No .gitmodules file found".to_string()));
     }
-    let modules_cfg = GitConfig::load_from_file(&gitmodules_path).unwrap_or_default();
+    let modules_cfg = GitConfig::load_from_file(&gitmodules_path)
+        .map_err(|e| TuiError::Terminal(e.to_string()))?;
     let url = modules_cfg
         .get("submodule", Some(submodule_name), "url")
         .ok_or_else(|| {
@@ -4814,7 +5099,8 @@ pub fn submodule_init(
         })?;
 
     let config_path = git_dir.join("config");
-    let mut config = GitConfig::load_from_file(&config_path).unwrap_or_default();
+    let mut config =
+        GitConfig::load_from_file(&config_path).map_err(|e| TuiError::Terminal(e.to_string()))?;
     config.set("submodule", Some(submodule_name), "url", url);
     config
         .save_to_file(&config_path)
@@ -5187,7 +5473,11 @@ pub fn bisect_mark(
         fs::write(git_dir.join("BISECT_BAD"), format!("{}\n", current_oid))?;
     } else {
         let good_file = git_dir.join("BISECT_GOOD");
-        let mut existing = fs::read_to_string(&good_file).unwrap_or_default();
+        let mut existing = match fs::read_to_string(&good_file) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
         existing.push_str(&format!("{}\n", current_oid));
         fs::write(&good_file, existing)?;
     }
@@ -5260,15 +5550,15 @@ pub fn bisect_reset(repo_root: &Path, git_dir: &Path) -> Result<(), TuiError> {
         .trim()
         .to_string();
 
-    let _ = fs::remove_file(start_file);
-    let _ = fs::remove_file(git_dir.join("BISECT_BAD"));
-    let _ = fs::remove_file(git_dir.join("BISECT_GOOD"));
-    let _ = fs::remove_file(git_dir.join("BISECT_LOG"));
-    let _ = fs::remove_file(git_dir.join("BISECT_ANCESTORS_OK"));
-
     if !orig.is_empty() {
-        let _ = checkout_branch(repo_root, git_dir, &orig);
+        checkout_branch(repo_root, git_dir, &orig)?;
     }
+
+    remove_file_if_exists(&start_file)?;
+    remove_file_if_exists(&git_dir.join("BISECT_BAD"))?;
+    remove_file_if_exists(&git_dir.join("BISECT_GOOD"))?;
+    remove_file_if_exists(&git_dir.join("BISECT_LOG"))?;
+    remove_file_if_exists(&git_dir.join("BISECT_ANCESTORS_OK"))?;
 
     Ok(())
 }

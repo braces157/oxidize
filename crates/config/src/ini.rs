@@ -257,6 +257,67 @@ impl GitConfig {
         self.sections.remove(&sec_key).is_some()
     }
 
+    /// Renames a subsection while preserving all keys and multivalued entries.
+    pub fn rename_subsection(
+        &mut self,
+        section: &str,
+        old_subsection: &str,
+        new_subsection: &str,
+    ) -> Result<bool, ConfigError> {
+        let old_key = ConfigSectionKey {
+            section: section.to_lowercase(),
+            subsection: Some(old_subsection.to_string()),
+        };
+        let new_key = ConfigSectionKey {
+            section: section.to_lowercase(),
+            subsection: Some(new_subsection.to_string()),
+        };
+        if old_key == new_key {
+            return Ok(self.sections.contains_key(&old_key));
+        }
+        if self.sections.contains_key(&new_key) {
+            return Err(ConfigError::SyntaxError(format!(
+                "section [{} \"{}\"] already exists",
+                section, new_subsection
+            )));
+        }
+        let Some(entries) = self.sections.remove(&old_key) else {
+            return Ok(false);
+        };
+        self.sections.insert(new_key, entries);
+        Ok(true)
+    }
+
+    /// Replaces text inside every value for a configuration key.
+    pub fn replace_in_values(
+        &mut self,
+        section: &str,
+        subsection: Option<&str>,
+        key: &str,
+        from: &str,
+        to: &str,
+    ) -> bool {
+        let sec_key = ConfigSectionKey {
+            section: section.to_lowercase(),
+            subsection: subsection.map(|value| value.to_string()),
+        };
+        let Some(values) = self
+            .sections
+            .get_mut(&sec_key)
+            .and_then(|entries| entries.get_mut(&key.to_lowercase()))
+        else {
+            return false;
+        };
+        let mut changed = false;
+        for value in values {
+            if value.contains(from) {
+                *value = value.replace(from, to);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Retrieves the URL for a named remote (e.g. "origin").
     pub fn get_remote_url(&self, name: &str) -> Option<&str> {
         self.get("remote", Some(name), "url")
@@ -439,8 +500,14 @@ impl GitConfig {
 
     /// Saves configuration to a file on disk.
     pub fn save_to_file(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
+        let path = path.as_ref();
         let serialized = self.serialize();
-        fs::write(path, serialized)?;
+        let mut lock = oxidize_core::LockFile::acquire(path)
+            .map_err(|e| ConfigError::Io(std::io::Error::other(e.to_string())))?;
+        use std::io::Write;
+        lock.write_all(serialized.as_bytes())?;
+        lock.commit()
+            .map_err(|e| ConfigError::Io(std::io::Error::other(e.to_string())))?;
         Ok(())
     }
 }

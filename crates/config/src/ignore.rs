@@ -16,12 +16,27 @@ pub struct IgnorePattern {
 impl IgnorePattern {
     /// Parses a single line from a `.gitignore` file. Returns `None` for comments/blank lines.
     pub fn parse(line: &str) -> Option<Self> {
-        let mut trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        let mut parsed = line.trim_end_matches('\r').to_string();
+        while parsed.ends_with(' ') {
+            let bytes = parsed.as_bytes();
+            let mut slash_count = 0usize;
+            let mut idx = bytes.len() - 1;
+            while idx > 0 && bytes[idx - 1] == b'\\' {
+                slash_count += 1;
+                idx -= 1;
+            }
+            if slash_count % 2 == 1 {
+                parsed.remove(bytes.len() - 2);
+                break;
+            }
+            parsed.pop();
+        }
+
+        if parsed.is_empty() || parsed.starts_with('#') {
             return None;
         }
 
-        // Handle escape for leading '#' or '!'
+        let mut trimmed = parsed.as_str();
         let mut is_negation = false;
         if trimmed.starts_with('!') {
             is_negation = true;
@@ -34,8 +49,12 @@ impl IgnorePattern {
             trimmed = trimmed.trim_end_matches('/');
         }
 
+        if trimmed.is_empty() {
+            return None;
+        }
+
         let anchored = trimmed.starts_with('/') || trimmed.contains('/');
-        let pattern = trimmed.trim_start_matches('/').to_string();
+        let pattern = trimmed.strip_prefix('/').unwrap_or(trimmed).to_string();
 
         Some(Self {
             pattern,
@@ -128,17 +147,15 @@ impl GitIgnore {
         // 1. .git/info/exclude
         let exclude_file = root.join(".git").join("info").join("exclude");
         if exclude_file.is_file() {
-            if let Ok(content) = fs::read_to_string(exclude_file) {
-                gi.add_patterns("", &content);
-            }
+            let content = fs::read_to_string(exclude_file)?;
+            gi.add_patterns("", &content);
         }
 
         // 2. root .gitignore
         let root_ignore = root.join(".gitignore");
         if root_ignore.is_file() {
-            if let Ok(content) = fs::read_to_string(root_ignore) {
-                gi.add_patterns("", &content);
-            }
+            let content = fs::read_to_string(root_ignore)?;
+            gi.add_patterns("", &content);
         }
 
         // 3. BFS walk for nested .gitignore
@@ -146,12 +163,10 @@ impl GitIgnore {
         queue.push_back(root.to_path_buf());
 
         while let Some(current_dir) = queue.pop_front() {
-            let entries = match fs::read_dir(&current_dir) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
+            let entries = fs::read_dir(&current_dir)?;
 
-            for entry in entries.flatten() {
+            for entry in entries {
+                let entry = entry?;
                 let path = entry.path();
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
@@ -172,9 +187,8 @@ impl GitIgnore {
                     // If directory contains a .gitignore, load it
                     let sub_ignore = path.join(".gitignore");
                     if sub_ignore.is_file() {
-                        if let Ok(content) = fs::read_to_string(sub_ignore) {
-                            gi.add_patterns(&format!("{}/", rel), &content);
-                        }
+                        let content = fs::read_to_string(sub_ignore)?;
+                        gi.add_patterns(&format!("{}/", rel), &content);
                     }
                     queue.push_back(path);
                 }
@@ -188,6 +202,29 @@ impl GitIgnore {
     pub fn is_ignored(&self, path: &str, is_dir: bool) -> bool {
         let normalized = path.replace('\\', "/");
         let norm_path = normalized.trim_matches('/');
+        if norm_path.is_empty() {
+            return false;
+        }
+
+        if self.is_ignored_direct(norm_path, is_dir) {
+            return true;
+        }
+
+        let mut ancestor = norm_path;
+        while let Some((parent, _)) = ancestor.rsplit_once('/') {
+            if parent.is_empty() {
+                break;
+            }
+            if self.is_ignored(parent, true) {
+                return true;
+            }
+            ancestor = parent;
+        }
+
+        false
+    }
+
+    fn is_ignored_direct(&self, norm_path: &str, is_dir: bool) -> bool {
         let mut ignored = false;
 
         for scoped in &self.patterns {
@@ -254,6 +291,14 @@ fn match_helper(p: &[char], pi: usize, t: &[char], ti: usize) -> bool {
 
     if ti == t.len() {
         return false;
+    }
+
+    // A backslash quotes the next character, making glob metacharacters literal.
+    if p[pi] == '\\' {
+        if pi + 1 < p.len() {
+            return p[pi + 1] == t[ti] && match_helper(p, pi + 2, t, ti + 1);
+        }
+        return t[ti] == '\\' && match_helper(p, pi + 1, t, ti + 1);
     }
 
     // Handle `?`
@@ -357,5 +402,32 @@ doc/**/*.pdf
         // Sub rule: /sub_only.txt is anchored to sub
         assert!(gi.is_ignored("sub/sub_only.txt", false));
         assert!(!gi.is_ignored("sub/nested/sub_only.txt", false));
+    }
+
+    #[test]
+    fn escaped_leading_markers_and_globs_are_literal() {
+        let gi = GitIgnore::parse("\\#literal\n\\!bang\nfile\\*.txt\n");
+        assert!(gi.is_ignored("#literal", false));
+        assert!(gi.is_ignored("!bang", false));
+        assert!(gi.is_ignored("file*.txt", false));
+        assert!(!gi.is_ignored("file123.txt", false));
+    }
+
+    #[test]
+    fn leading_and_escaped_trailing_spaces_follow_git_syntax() {
+        let gi = GitIgnore::parse(" leading\ntrailing\\ \nplain   \n");
+        assert!(gi.is_ignored(" leading", false));
+        assert!(!gi.is_ignored("leading", false));
+        assert!(gi.is_ignored("trailing ", false));
+        assert!(gi.is_ignored("plain", false));
+        assert!(!gi.is_ignored("plain   ", false));
+    }
+
+    #[test]
+    fn ignored_directory_also_ignores_descendants() {
+        let gi = GitIgnore::parse("cache/\n");
+        assert!(gi.is_ignored("cache", true));
+        assert!(gi.is_ignored("cache/item.txt", false));
+        assert!(gi.is_ignored("nested/cache/item.txt", false));
     }
 }

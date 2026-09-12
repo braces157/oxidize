@@ -16,7 +16,7 @@
 ---
 
 [![CI Status](https://github.com/braces157/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/braces157/oxidize/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.2.0-orange.svg?logo=rust)](https://github.com/braces157/oxidize/releases)
+[![Version](https://img.shields.io/badge/version-v0.2.1-orange.svg?logo=rust)](https://github.com/braces157/oxidize/releases)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg?logo=github)](https://braces157.github.io/oxidize/)
 [![Rust Version](https://img.shields.io/badge/rustc-1.88+-blue.svg?logo=rust)](https://www.rust-lang.org)
 [![Git Compatibility](https://img.shields.io/badge/git%20compatibility-differential%20verified-blueviolet.svg?logo=git)](https://git-scm.com)
@@ -185,12 +185,12 @@ ox ui
 ## 📦 Installation
 
 ### Prerequisites
-- **Rust Toolchain**: 1.80 or later (`rustup update stable`)
+- **Rust Toolchain**: 1.88 or later (`rustup update stable`)
 - **Git** (optional, recommended for differential validation)
 
 ### Option A: Install via Cargo (from Git)
 ```bash
-cargo install --git https://github.com/braces157/oxidize.git
+cargo install --git https://github.com/braces157/oxidize.git --locked
 
 # Verify installation
 ox --version
@@ -203,11 +203,13 @@ git clone https://github.com/braces157/oxidize.git
 cd oxidize
 
 # Install into cargo bin directory
-cargo install --path crates/cli --force
+cargo install --path crates/cli --force --locked
 
 # Or build release binary directly
 cargo build --release
 ```
+
+Cargo installs `ox` into `%USERPROFILE%\.cargo\bin` on Windows (or `$HOME/.cargo/bin` on Unix-like systems). Make sure that directory is on `PATH`. A direct source build is also available at `target/release/ox` (`target\release\ox.exe` on Windows).
 
 ### Shell Completions
 Oxidize generates native completion scripts for all major shells out of the box:
@@ -346,9 +348,10 @@ ox bisect reset                     # Terminate bisect session and restore origi
 ox clone <url> [directory]          # Clone over Smart HTTP, Native SSH, or local repo
 ox remote add <name> <url>          # Register a new remote repository
 ox remote remove <name>             # Remove a configured remote
+ox remote rename <old> <new>        # Rename a remote and its tracking refs/config
 ox fetch [remote]                   # Fetch references and packfiles
 ox pull [remote] [branch]           # Fetch and fast-forward/merge into current branch
-ox push [remote] [branch]           # Push local commits and update remote refs
+ox push [-f|--force] [remote] [branch] # Push local commits and update remote refs
 ```
 
 ### Standard Shorthand Aliases
@@ -374,6 +377,9 @@ ox gc                               # Pack loose objects with multi-threaded del
 ox fsck                             # Verify connectivity and SHA-1 validity of all objects
 ox ui                               # Launch interactive terminal UI dashboard
 ox completions <shell>              # Generate shell completion scripts (bash, zsh, fish, etc.)
+ox fmt [--check] [files...]         # Format Rust sources with rustfmt
+ox fmt --staged [--check]           # Format/check staged Rust blobs without touching worktree files
+ox fmt --install-hook               # Install a pre-commit formatting check hook
 ```
 
 ### Low-Level Plumbing (For Scripting & Tools)

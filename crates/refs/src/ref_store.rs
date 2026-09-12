@@ -38,6 +38,77 @@ fn normalize_path_components(path: &Path) -> PathBuf {
     normalized
 }
 
+fn snapshot_file(path: &Path) -> Result<Option<Vec<u8>>, RefError> {
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(Some(fs::read(path)?)),
+        Ok(_) => Err(RefError::Io(std::io::Error::other(format!(
+            "expected '{}' to be a regular file",
+            path.display()
+        )))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(RefError::Io(e)),
+    }
+}
+
+fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), RefError> {
+    let mut lock = LockFile::acquire(path).map_err(RefError::Core)?;
+    lock.write_all(data)?;
+    lock.commit().map_err(RefError::Core)
+}
+
+fn remove_regular_file_if_exists(path: &Path) -> Result<(), RefError> {
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_file() => {
+            fs::remove_file(path)?;
+            Ok(())
+        }
+        Ok(_) => Err(RefError::Io(std::io::Error::other(format!(
+            "expected '{}' to be a regular file",
+            path.display()
+        )))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(RefError::Io(e)),
+    }
+}
+
+fn restore_file(path: &Path, snapshot: &Option<Vec<u8>>) -> Result<(), RefError> {
+    match snapshot {
+        Some(data) => write_file_atomic(path, data),
+        None => remove_regular_file_if_exists(path),
+    }
+}
+
+fn rollback_files(snapshots: &[(PathBuf, Option<Vec<u8>>)]) -> Result<(), RefError> {
+    let mut first_error = None;
+    for (path, snapshot) in snapshots.iter().rev() {
+        if let Err(error) = restore_file(path, snapshot) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn with_rollback<T>(
+    snapshots: &[(PathBuf, Option<Vec<u8>>)],
+    operation: impl FnOnce() -> Result<T, RefError>,
+) -> Result<T, RefError> {
+    match operation() {
+        Ok(value) => Ok(value),
+        Err(original) => match rollback_files(snapshots) {
+            Ok(()) => Err(original),
+            Err(rollback) => Err(RefError::RevParseError(format!(
+                "{}; rollback also failed: {}",
+                original, rollback
+            ))),
+        },
+    }
+}
+
 fn resolve_common_dir(git_dir: &Path) -> PathBuf {
     let commondir_file = git_dir.join("commondir");
     if commondir_file.is_file() {
@@ -101,33 +172,78 @@ impl RefStore {
         let content = fs::read_to_string(head_path)?;
         let content = content.trim();
 
+        let resolve_symbolic = |name: &str| -> Result<Option<ObjectId>, RefError> {
+            match self.read_ref(name) {
+                Ok(oid) => Ok(Some(oid)),
+                Err(RefError::NotFound(_)) => Ok(None),
+                Err(error) => Err(error),
+            }
+        };
+
         if let Some(rest) = content.strip_prefix("ref: refs/heads/") {
+            if rest.is_empty() {
+                return Err(RefError::RevParseError(
+                    "malformed HEAD: empty branch name".to_string(),
+                ));
+            }
             let branch = rest.to_string();
-            let oid = self.read_ref(&format!("refs/heads/{}", branch)).ok();
+            let oid = resolve_symbolic(&format!("refs/heads/{}", branch))?;
             Ok((branch, oid))
         } else if let Some(rest) = content.strip_prefix("ref: ") {
+            if rest.is_empty() {
+                return Err(RefError::RevParseError(
+                    "malformed HEAD: empty symbolic ref".to_string(),
+                ));
+            }
             let full_ref = rest.to_string();
-            let oid = self.read_ref(&full_ref).ok();
+            let oid = resolve_symbolic(&full_ref)?;
             Ok((full_ref, oid))
-        } else if let Ok(oid) = content.parse::<ObjectId>() {
-            Ok(("HEAD".to_string(), Some(oid)))
         } else {
-            Ok(("master".to_string(), None))
+            let oid = content.parse::<ObjectId>().map_err(|_| {
+                RefError::RevParseError(format!("malformed HEAD contents: {content:?}"))
+            })?;
+            Ok(("HEAD".to_string(), Some(oid)))
         }
     }
 
     /// Reads a reference by full or short name, checking loose refs then `packed-refs`.
     pub fn read_ref(&self, ref_name: &str) -> Result<ObjectId, RefError> {
+        self.read_ref_inner(ref_name, 0)
+    }
+
+    fn read_ref_inner(&self, ref_name: &str, depth: usize) -> Result<ObjectId, RefError> {
+        if depth > 16 {
+            return Err(RefError::RevParseError(format!(
+                "symbolic reference cycle while resolving '{}'",
+                ref_name
+            )));
+        }
         let normalized = self.normalize_ref_name(ref_name);
+
+        let parse_loose = |content: &str| -> Result<ObjectId, RefError> {
+            let content = content.trim();
+            if let Some(target) = content.strip_prefix("ref: ") {
+                if target.is_empty() {
+                    return Err(RefError::RevParseError(format!(
+                        "malformed symbolic reference '{}': empty target",
+                        normalized
+                    )));
+                }
+                return self.read_ref_inner(target, depth + 1);
+            }
+            content.parse::<ObjectId>().map_err(|_| {
+                RefError::RevParseError(format!(
+                    "malformed reference '{}': invalid object id",
+                    normalized
+                ))
+            })
+        };
 
         // 1. Check per-worktree loose ref file (e.g. for HEAD, or worktree-local refs)
         let loose_path = self.git_dir.join(&normalized);
         if loose_path.is_file() {
             let content = fs::read_to_string(loose_path)?;
-            let content = content.trim();
-            if let Ok(oid) = content.parse::<ObjectId>() {
-                return Ok(oid);
-            }
+            return parse_loose(&content);
         }
 
         // 2. Check common_dir loose ref file (for shared refs)
@@ -135,10 +251,7 @@ impl RefStore {
             let common_path = self.common_dir.join(&normalized);
             if common_path.is_file() {
                 let content = fs::read_to_string(common_path)?;
-                let content = content.trim();
-                if let Ok(oid) = content.parse::<ObjectId>() {
-                    return Ok(oid);
-                }
+                return parse_loose(&content);
             }
         }
 
@@ -236,24 +349,22 @@ impl RefStore {
             if path.is_dir() {
                 self.scan_refs_dir(&path, &format!("{}/{}", prefix, name), out)?;
             } else if path.is_file() {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(oid) = content.trim().parse::<ObjectId>() {
-                        let item_name = if let Some(stripped) = prefix
-                            .strip_prefix("refs/heads")
-                            .or_else(|| prefix.strip_prefix("refs/tags"))
-                            .or_else(|| prefix.strip_prefix("refs/remotes"))
-                        {
-                            if stripped.is_empty() {
-                                name
-                            } else {
-                                format!("{}/{}", stripped.trim_start_matches('/'), name)
-                            }
-                        } else {
-                            name
-                        };
-                        out.insert(item_name, oid);
+                let full_ref = format!("{}/{}", prefix, name);
+                let oid = self.read_ref(&full_ref)?;
+                let item_name = if let Some(stripped) = prefix
+                    .strip_prefix("refs/heads")
+                    .or_else(|| prefix.strip_prefix("refs/tags"))
+                    .or_else(|| prefix.strip_prefix("refs/remotes"))
+                {
+                    if stripped.is_empty() {
+                        name
+                    } else {
+                        format!("{}/{}", stripped.trim_start_matches('/'), name)
                     }
-                }
+                } else {
+                    name
+                };
+                out.insert(item_name, oid);
             }
         }
         Ok(())
@@ -280,12 +391,11 @@ impl RefStore {
             fs::create_dir_all(parent)?;
         }
 
-        let mut lock = oxidize_core::LockFile::acquire(&ref_path).map_err(|e| match e {
-            oxidize_core::CoreError::LockError(msg) => RefError::RevParseError(msg),
-            other => RefError::Core(other),
-        })?;
-
-        let current_oid = self.read_ref(&normalized).ok();
+        let current_oid = match self.read_ref(&normalized) {
+            Ok(oid) => Some(oid),
+            Err(RefError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
 
         if let Some(expected) = old_oid {
             if current_oid.as_ref() != Some(expected) {
@@ -296,22 +406,30 @@ impl RefStore {
             }
         }
 
-        use std::io::Write;
-        writeln!(lock, "{}", new_oid)?;
-        lock.commit()?;
+        let (head_name, _) = self.resolve_head()?;
+        let is_active = normalized != "HEAD"
+            && (head_name == ref_name || format!("refs/heads/{}", head_name) == normalized);
+        let ref_log_path = self.common_dir.join("logs").join(&normalized);
+        let head_log_path = self.git_dir.join("logs").join("HEAD");
+        let mut snapshot_paths = vec![ref_path.clone(), ref_log_path];
+        if is_active && !snapshot_paths.contains(&head_log_path) {
+            snapshot_paths.push(head_log_path);
+        }
+        let snapshots = snapshot_paths
+            .into_iter()
+            .map(|path| snapshot_file(&path).map(|snapshot| (path, snapshot)))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        // Append reflog
         let from_oid = current_oid.unwrap_or(ObjectId::ZERO);
         let sig = get_default_signature(Some(&self.git_dir));
-        self.append_reflog(&normalized, &from_oid, new_oid, &sig, message)?;
-
-        // Also append to HEAD reflog if updating the active branch
-        let head_info = self.resolve_head()?;
-        if head_info.0 == ref_name || format!("refs/heads/{}", head_info.0) == normalized {
-            self.append_reflog("HEAD", &from_oid, new_oid, &sig, message)?;
-        }
-
-        Ok(())
+        with_rollback(&snapshots, || {
+            write_file_atomic(&ref_path, format!("{}\n", new_oid).as_bytes())?;
+            self.append_reflog(&normalized, &from_oid, new_oid, &sig, message)?;
+            if is_active {
+                self.append_reflog("HEAD", &from_oid, new_oid, &sig, message)?;
+            }
+            Ok(())
+        })
     }
 
     /// Appends an entry to `.git/logs/<ref_name>`.
@@ -433,38 +551,36 @@ impl RefStore {
 
         let real_idx = entries.len() - 1 - index;
         let removed = entries.remove(real_idx);
-
         let stash_ref = self.common_dir.join("refs").join("stash");
         let stash_log = self.common_dir.join("logs").join("refs").join("stash");
+        let snapshots = vec![
+            (stash_ref.clone(), snapshot_file(&stash_ref)?),
+            (stash_log.clone(), snapshot_file(&stash_log)?),
+        ];
 
-        if entries.is_empty() {
-            let _ = fs::remove_file(&stash_ref);
-            let _ = fs::remove_file(&stash_log);
-        } else {
-            // Rewrite the reflog: line 0 has old_oid = 0, subsequent lines have old_oid = previous new_oid
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&stash_log)?;
-
-            let mut prev_oid = ObjectId::ZERO;
-            for entry in &entries {
-                writeln!(
-                    file,
-                    "{} {} {}\t{}",
-                    prev_oid, entry.new_oid, entry.signature, entry.message
-                )?;
-                prev_oid = entry.new_oid;
+        with_rollback(&snapshots, || {
+            if entries.is_empty() {
+                remove_regular_file_if_exists(&stash_ref)?;
+                remove_regular_file_if_exists(&stash_log)?;
+            } else {
+                let mut log_data = Vec::new();
+                let mut prev_oid = ObjectId::ZERO;
+                for entry in &entries {
+                    writeln!(
+                        log_data,
+                        "{} {} {}\t{}",
+                        prev_oid, entry.new_oid, entry.signature, entry.message
+                    )?;
+                    prev_oid = entry.new_oid;
+                }
+                write_file_atomic(&stash_log, &log_data)?;
+                let newest = entries.last().ok_or_else(|| {
+                    RefError::RevParseError("stash reflog unexpectedly became empty".to_string())
+                })?;
+                write_file_atomic(&stash_ref, format!("{}\n", newest.new_oid).as_bytes())?;
             }
-            file.flush()?;
-
-            // Update refs/stash to the newest remaining entry
-            let newest = entries.last().unwrap();
-            let mut lock = LockFile::acquire(&stash_ref).map_err(RefError::Core)?;
-            lock.write_all(format!("{}\n", newest.new_oid).as_bytes())?;
-            lock.commit().map_err(RefError::Core)?;
-        }
+            Ok(())
+        })?;
 
         Ok(removed.new_oid)
     }
@@ -571,11 +687,20 @@ impl RefStore {
                 continue;
             }
 
-            if let Some((sha, name)) = line.split_once(' ') {
-                if let Ok(oid) = sha.parse::<ObjectId>() {
-                    map.insert(name.trim().to_string(), oid);
-                }
+            let (sha, name) = line.split_once(' ').ok_or_else(|| {
+                RefError::RevParseError(format!("malformed packed-ref line: '{}'", line))
+            })?;
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(RefError::RevParseError(format!(
+                    "malformed packed-ref line: '{}'",
+                    line
+                )));
             }
+            let oid = sha.parse::<ObjectId>().map_err(|_| {
+                RefError::RevParseError(format!("malformed packed-ref object id: '{}'", sha))
+            })?;
+            map.insert(name.to_string(), oid);
         }
 
         Ok(map)
@@ -617,36 +742,44 @@ impl RefStore {
     /// Deletes any reference by full name (e.g. `refs/heads/foo`, `refs/remotes/origin/bar`, `refs/tags/v1.0`),
     /// removing loose files from `common_dir` and `git_dir`, and removing the entry from `packed-refs`.
     pub fn delete_ref(&self, ref_name: &str) -> Result<(), RefError> {
-        let mut deleted = false;
-
-        // 1. Try deleting loose ref file from common_dir
         let ref_path = self.common_dir.join(ref_name);
-        if ref_path.exists() {
-            fs::remove_file(&ref_path)?;
-            deleted = true;
-        }
-
-        // 2. Try deleting loose ref file from git_dir if different
-        if self.git_dir != self.common_dir {
-            let wt_ref_path = self.git_dir.join(ref_name);
-            if wt_ref_path.exists() {
-                fs::remove_file(&wt_ref_path)?;
-                deleted = true;
-            }
-        }
-
-        // 3. Remove from packed-refs if present
+        let wt_ref_path = (self.git_dir != self.common_dir).then(|| self.git_dir.join(ref_name));
         let packed_path = self.common_dir.join("packed-refs");
-        if packed_path.exists() {
-            let content = fs::read_to_string(&packed_path)?;
+
+        let mut snapshots = vec![(ref_path.clone(), snapshot_file(&ref_path)?)];
+        if let Some(path) = &wt_ref_path {
+            snapshots.push((path.clone(), snapshot_file(path)?));
+        }
+        snapshots.push((packed_path.clone(), snapshot_file(&packed_path)?));
+
+        let loose_exists = snapshots
+            .iter()
+            .any(|(path, snapshot)| path != &packed_path && snapshot.is_some());
+        let packed_content = snapshots
+            .iter()
+            .find(|(path, _)| path == &packed_path)
+            .and_then(|(_, snapshot)| snapshot.as_ref())
+            .map(|bytes| {
+                std::str::from_utf8(bytes).map_err(|e| {
+                    RefError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                })
+            })
+            .transpose()?;
+
+        let mut packed_rewrite: Option<Vec<u8>> = None;
+        let mut packed_contains_ref = false;
+        if let Some(content) = packed_content {
             let mut new_lines = Vec::new();
-            let mut in_packed = false;
             let mut skip_next_peeled = false;
 
             for line in content.lines() {
                 let trimmed = line.trim();
-                if trimmed.starts_with('^') && skip_next_peeled {
-                    skip_next_peeled = false;
+                if trimmed.starts_with('^') {
+                    if skip_next_peeled {
+                        skip_next_peeled = false;
+                    } else {
+                        new_lines.push(line.to_string());
+                    }
                     continue;
                 }
                 skip_next_peeled = false;
@@ -656,34 +789,41 @@ impl RefStore {
                     continue;
                 }
 
-                if let Some((_sha, rname)) = trimmed.split_once(' ') {
-                    if rname.trim() == ref_name {
-                        in_packed = true;
-                        skip_next_peeled = true;
-                        continue;
-                    }
+                let (_sha, rname) = trimmed.split_once(' ').ok_or_else(|| {
+                    RefError::RevParseError(format!("malformed packed-ref line: '{}'", line))
+                })?;
+                if rname.trim() == ref_name {
+                    packed_contains_ref = true;
+                    skip_next_peeled = true;
+                    continue;
                 }
                 new_lines.push(line.to_string());
             }
 
-            if in_packed {
-                let mut lock = LockFile::acquire(&packed_path).map_err(RefError::Core)?;
-                use std::io::Write;
-                for line in new_lines {
-                    writeln!(lock, "{}", line)?;
+            if packed_contains_ref {
+                let mut rewritten = new_lines.join("\n").into_bytes();
+                if !rewritten.is_empty() {
+                    rewritten.push(b'\n');
                 }
-                lock.commit().map_err(RefError::Core)?;
-                deleted = true;
+                packed_rewrite = Some(rewritten);
             }
         }
 
-        if !deleted {
+        if !loose_exists && !packed_contains_ref {
             return Err(RefError::NotFound(format!("ref '{}' not found", ref_name)));
         }
 
-        Ok(())
+        with_rollback(&snapshots, || {
+            remove_regular_file_if_exists(&ref_path)?;
+            if let Some(path) = &wt_ref_path {
+                remove_regular_file_if_exists(path)?;
+            }
+            if let Some(rewritten) = &packed_rewrite {
+                write_file_atomic(&packed_path, rewritten)?;
+            }
+            Ok(())
+        })
     }
-
     /// Deletes a branch reference, removing loose ref files and purging from packed-refs if present.
     pub fn delete_branch(&self, name: &str) -> Result<(), RefError> {
         oxidize_core::validate_branch_name(name)?;
@@ -774,65 +914,188 @@ impl RefStore {
     /// Updates the branch ref, moves reflog, updates `HEAD` if currently on `old_name`,
     /// and deletes the old ref (both loose and packed).
     pub fn rename_branch(&self, old_name: &str, new_name: &str) -> Result<(), RefError> {
+        oxidize_core::validate_branch_name(old_name)?;
         oxidize_core::validate_branch_name(new_name)?;
+        if old_name == new_name {
+            return Ok(());
+        }
         let old_ref = format!("refs/heads/{}", old_name);
         let new_ref = format!("refs/heads/{}", new_name);
-
-        let target_oid = self
-            .read_ref(&old_ref)
-            .map_err(|_| RefError::NotFound(format!("branch '{}' not found", old_name)))?;
-
-        // Verify new branch does not already exist
-        if self.read_ref(&new_ref).is_ok() {
-            return Err(RefError::InvalidName(format!(
-                "a branch named '{}' already exists",
-                new_name
-            )));
+        let target_oid = self.read_ref(&old_ref).map_err(|error| match error {
+            RefError::NotFound(_) => RefError::NotFound(format!("branch '{}' not found", old_name)),
+            other => other,
+        })?;
+        match self.read_ref(&new_ref) {
+            Ok(_) => {
+                return Err(RefError::InvalidName(format!(
+                    "a branch named '{}' already exists",
+                    new_name
+                )))
+            }
+            Err(RefError::NotFound(_)) => {}
+            Err(error) => return Err(error),
         }
 
-        // 1. Create new branch ref pointing to target_oid
-        self.create_branch(new_name, &target_oid)?;
-
-        // 2. If HEAD currently points to old_name, point HEAD to new_name
         let (current_head_branch, _) = self.resolve_head()?;
         let is_current = current_head_branch == old_name;
+        let old_ref_path = self.common_dir.join(&old_ref);
+        let new_ref_path = self.common_dir.join(&new_ref);
+        let head_path = self.git_dir.join("HEAD");
+        let old_log = self.common_dir.join("logs").join(&old_ref);
+        let new_log = self.common_dir.join("logs").join(&new_ref);
+        let head_log = self.git_dir.join("logs").join("HEAD");
+        let packed_refs = self.common_dir.join("packed-refs");
+
+        let mut paths = vec![
+            old_ref_path,
+            new_ref_path,
+            old_log.clone(),
+            new_log.clone(),
+            packed_refs,
+        ];
         if is_current {
-            self.set_head_symbolic(new_name)?;
+            paths.push(head_path);
+            paths.push(head_log);
         }
-
-        // 3. Move reflog if it exists
-        let old_log = self
-            .common_dir
-            .join("logs")
-            .join("refs/heads")
-            .join(old_name);
-        let new_log = self
-            .common_dir
-            .join("logs")
-            .join("refs/heads")
-            .join(new_name);
-        if old_log.exists() {
-            if let Some(parent) = new_log.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let _ = fs::rename(&old_log, &new_log);
-        }
-
-        // 4. Delete old branch ref
-        self.delete_branch(old_name)?;
-
-        // 5. Append reflog entry
+        let snapshots = paths
+            .into_iter()
+            .map(|path| snapshot_file(&path).map(|snapshot| (path, snapshot)))
+            .collect::<Result<Vec<_>, _>>()?;
         let sig = get_default_signature(Some(&self.git_dir));
         let log_msg = format!(
             "Branch: renamed refs/heads/{} to refs/heads/{}",
             old_name, new_name
         );
-        let _ = self.append_reflog(&new_ref, &ObjectId::ZERO, &target_oid, &sig, &log_msg);
-        if is_current {
-            let _ = self.append_reflog("HEAD", &target_oid, &target_oid, &sig, &log_msg);
+
+        with_rollback(&snapshots, || {
+            self.create_branch(new_name, &target_oid)?;
+            if is_current {
+                self.set_head_symbolic(new_name)?;
+            }
+            if old_log.exists() {
+                if new_log.exists() {
+                    return Err(RefError::Io(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!("reflog '{}' already exists", new_log.display()),
+                    )));
+                }
+                if let Some(parent) = new_log.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::rename(&old_log, &new_log)?;
+            }
+            self.delete_branch(old_name)?;
+            self.append_reflog(&new_ref, &target_oid, &target_oid, &sig, &log_msg)?;
+            if is_current {
+                self.append_reflog("HEAD", &target_oid, &target_oid, &sig, &log_msg)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Atomically renames all tracking refs under `refs/remotes/<old>/`.
+    pub fn rename_remote_refs(&self, old_name: &str, new_name: &str) -> Result<(), RefError> {
+        if old_name.is_empty() || new_name.is_empty() {
+            return Err(RefError::InvalidName(
+                "remote name cannot be empty".to_string(),
+            ));
+        }
+        oxidize_core::validate_ref_name(&format!("refs/remotes/{old_name}/probe"))
+            .map_err(|e| RefError::InvalidName(e.to_string()))?;
+        oxidize_core::validate_ref_name(&format!("refs/remotes/{new_name}/probe"))
+            .map_err(|e| RefError::InvalidName(e.to_string()))?;
+        if old_name == new_name {
+            return Ok(());
         }
 
-        Ok(())
+        let remotes = self.list_remotes()?;
+        let old_prefix = format!("{old_name}/");
+        let new_prefix = format!("{new_name}/");
+        let moving: Vec<(String, String, ObjectId)> = remotes
+            .iter()
+            .filter_map(|(name, oid)| {
+                name.strip_prefix(&old_prefix).map(|rest| {
+                    (
+                        format!("refs/remotes/{name}"),
+                        format!("refs/remotes/{new_prefix}{rest}"),
+                        *oid,
+                    )
+                })
+            })
+            .collect();
+        for (_, new_ref, _) in &moving {
+            match self.read_ref(new_ref) {
+                Ok(_) => {
+                    return Err(RefError::InvalidName(format!(
+                        "tracking reference '{}' already exists",
+                        new_ref
+                    )))
+                }
+                Err(RefError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        let mut paths = vec![self.common_dir.join("packed-refs")];
+        for (old_ref, new_ref, _) in &moving {
+            paths.push(self.common_dir.join(old_ref));
+            paths.push(self.common_dir.join(new_ref));
+            paths.push(self.common_dir.join("logs").join(old_ref));
+            paths.push(self.common_dir.join("logs").join(new_ref));
+        }
+        paths.sort();
+        paths.dedup();
+        let snapshots = paths
+            .into_iter()
+            .map(|path| snapshot_file(&path).map(|snapshot| (path, snapshot)))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        with_rollback(&snapshots, || {
+            for (_, new_ref, oid) in &moving {
+                self.update_ref(new_ref, oid, None, "remote: rename tracking ref")?;
+            }
+            for (old_ref, _, _) in &moving {
+                self.delete_ref(old_ref)?;
+                remove_regular_file_if_exists(&self.common_dir.join("logs").join(old_ref))?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Atomically removes all tracking refs under `refs/remotes/<name>/`.
+    pub fn remove_remote_refs(&self, name: &str) -> Result<(), RefError> {
+        if name.is_empty() {
+            return Err(RefError::InvalidName(
+                "remote name cannot be empty".to_string(),
+            ));
+        }
+        oxidize_core::validate_ref_name(&format!("refs/remotes/{name}/probe"))
+            .map_err(|e| RefError::InvalidName(e.to_string()))?;
+        let remotes = self.list_remotes()?;
+        let prefix = format!("{name}/");
+        let refs: Vec<String> = remotes
+            .keys()
+            .filter(|remote| remote.starts_with(&prefix))
+            .map(|remote| format!("refs/remotes/{remote}"))
+            .collect();
+        let mut paths = vec![self.common_dir.join("packed-refs")];
+        for ref_name in &refs {
+            paths.push(self.common_dir.join(ref_name));
+            paths.push(self.common_dir.join("logs").join(ref_name));
+        }
+        paths.sort();
+        paths.dedup();
+        let snapshots = paths
+            .into_iter()
+            .map(|path| snapshot_file(&path).map(|snapshot| (path, snapshot)))
+            .collect::<Result<Vec<_>, _>>()?;
+        with_rollback(&snapshots, || {
+            for ref_name in &refs {
+                self.delete_ref(ref_name)?;
+                remove_regular_file_if_exists(&self.common_dir.join("logs").join(ref_name))?;
+            }
+            Ok(())
+        })
     }
 
     /// Creates a lightweight tag pointing to `target_oid`.

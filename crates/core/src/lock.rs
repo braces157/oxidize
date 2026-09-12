@@ -76,7 +76,7 @@ impl LockFile {
         if cfg!(windows) && self.target_path.exists() {
             let backup_path = PathBuf::from(format!("{}.lockbackup", self.target_path.display()));
             if backup_path.exists() {
-                let _ = fs::remove_file(&backup_path);
+                fs::remove_file(&backup_path).map_err(CoreError::Io)?;
             }
             if let Err(_e) = fs::rename(&self.target_path, &backup_path) {
                 // If moving to backup fails, attempt standard rename directly
@@ -84,11 +84,18 @@ impl LockFile {
             } else {
                 match fs::rename(&self.lock_path, &self.target_path) {
                     Ok(()) => {
-                        let _ = fs::remove_file(&backup_path);
+                        fs::remove_file(&backup_path).map_err(CoreError::Io)?;
                     }
                     Err(e) => {
                         // Restore from backup on failure
-                        let _ = fs::rename(&backup_path, &self.target_path);
+                        if let Err(restore_error) = fs::rename(&backup_path, &self.target_path) {
+                            return Err(CoreError::Io(io::Error::other(format!(
+                                "failed to install lockfile: {}; restoring original '{}' also failed: {}",
+                                e,
+                                self.target_path.display(),
+                                restore_error
+                            ))));
+                        }
                         return Err(CoreError::Io(e));
                     }
                 }

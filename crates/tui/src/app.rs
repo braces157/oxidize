@@ -137,7 +137,7 @@ use oxidize_index::{
     compute_status_with_ignore, flatten_tree, Index, StagedChange, UnstagedChange,
 };
 use oxidize_pack::RepoObjectStore;
-use oxidize_refs::RefStore;
+use oxidize_refs::{RefError, RefStore};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -352,7 +352,8 @@ impl App {
             }
         });
 
-        let gitignore = GitIgnore::load_from_dir(&self.repo_root).unwrap_or_default();
+        let gitignore = GitIgnore::load_from_dir(&self.repo_root)
+            .map_err(|e| TuiError::Terminal(format!("Failed to load ignore rules: {}", e)))?;
         let status = compute_status_with_ignore(
             &self.repo_root,
             &index,
@@ -428,8 +429,8 @@ impl App {
         self.remotes = ops::read_remotes(&self.common_dir);
         self.tags = ops::read_tags(&self.common_dir);
         self.reflog = ops::read_reflog(&self.git_dir);
-        self.bisect_state = ops::get_bisect_state(&self.git_dir).unwrap_or_default();
-        self.submodules = ops::list_submodules(&self.repo_root, &self.git_dir).unwrap_or_default();
+        self.bisect_state = ops::get_bisect_state(&self.git_dir)?;
+        self.submodules = ops::list_submodules(&self.repo_root, &self.git_dir)?;
 
         // 7. Calculate ahead / behind relative to upstream
         self.ahead_behind = self.compute_ahead_behind(&store);
@@ -4559,7 +4560,16 @@ impl App {
 
         let config_path = self.common_dir.join("config");
         let config = if config_path.exists() {
-            oxidize_config::GitConfig::load_from_file(&config_path).unwrap_or_default()
+            match oxidize_config::GitConfig::load_from_file(&config_path) {
+                Ok(config) => config,
+                Err(error) => {
+                    self.status_message = Some(format!(
+                        "✗ Force-push (with lease) failed to load repository config: {}",
+                        error
+                    ));
+                    return;
+                }
+            }
         } else {
             oxidize_config::GitConfig::new()
         };
@@ -4576,7 +4586,17 @@ impl App {
 
         let tracking_ref = format!("refs/remotes/{}/{}", remote_name, remote_branch_short);
         let ref_store = RefStore::with_common_dir(&self.git_dir, &self.common_dir);
-        let expected_oid = ref_store.read_ref(&tracking_ref).ok();
+        let expected_oid = match ref_store.read_ref(&tracking_ref) {
+            Ok(oid) => Some(oid),
+            Err(RefError::NotFound(_)) => None,
+            Err(error) => {
+                self.status_message = Some(format!(
+                    "✗ Force-push (with lease) failed to read tracking ref '{}': {}",
+                    tracking_ref, error
+                ));
+                return;
+            }
+        };
 
         match ops::push_to_remote_ext(
             &self.repo_root,

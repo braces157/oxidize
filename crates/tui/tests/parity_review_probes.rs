@@ -425,3 +425,113 @@ fn action_dispatch_tag_and_branch_with_decoy_same_name() {
         other => panic!("expected DeleteBranch confirmation, got {other:?}"),
     }
 }
+
+#[test]
+fn worktree_removal_rejects_corrupt_required_metadata_even_with_force() {
+    for corruption in ["index", "HEAD", "dotgit"] {
+        let t = repo();
+        let root = t.path();
+        let git_dir = root.join(".git");
+        let holder = TempDir::new().unwrap();
+        let wt = holder.path().join("linked");
+        git(
+            root,
+            &["worktree", "add", "-b", "topic", wt.to_str().unwrap()],
+        );
+        let admin = git_dir.join("worktrees").join("linked");
+
+        match corruption {
+            "index" => fs::write(admin.join("index"), b"not an index").unwrap(),
+            "HEAD" => fs::write(admin.join("HEAD"), b"definitely-not-a-ref-or-oid\n").unwrap(),
+            "dotgit" => fs::write(wt.join(".git"), b"broken reciprocal link\n").unwrap(),
+            _ => unreachable!(),
+        }
+
+        let result = ops::remove_worktree(&git_dir, "linked", true);
+        assert!(
+            result.is_err(),
+            "{corruption} corruption must abort removal"
+        );
+        assert!(
+            wt.exists(),
+            "{corruption} corruption must preserve the worktree"
+        );
+        assert!(
+            admin.exists(),
+            "{corruption} corruption must preserve admin metadata"
+        );
+    }
+}
+
+#[test]
+fn remote_rename_rolls_back_config_when_tracking_ref_migration_fails() {
+    let t = repo();
+    let root = t.path();
+    let git_dir = root.join(".git");
+    git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ],
+    );
+    let head = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["update-ref", "refs/remotes/origin/main", &head]);
+    fs::create_dir_all(git_dir.join("refs/remotes/upstream")).unwrap();
+    fs::write(
+        git_dir.join("refs/remotes/upstream/main.lock"),
+        "occupied\n",
+    )
+    .unwrap();
+
+    let before = fs::read_to_string(git_dir.join("config")).unwrap();
+    let result = ops::rename_remote(&git_dir, "origin", "upstream");
+    assert!(result.is_err());
+    assert_eq!(fs::read_to_string(git_dir.join("config")).unwrap(), before);
+    assert_eq!(git(root, &["rev-parse", "refs/remotes/origin/main"]), head);
+    assert!(!git_dir.join("refs/remotes/upstream/main").exists());
+}
+
+#[test]
+fn remote_remove_rolls_back_config_when_packed_ref_update_is_locked() {
+    let t = repo();
+    let root = t.path();
+    let git_dir = root.join(".git");
+    git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ],
+    );
+    let head = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["update-ref", "refs/remotes/origin/main", &head]);
+    git(root, &["pack-refs", "--all"]);
+    fs::write(git_dir.join("packed-refs.lock"), "occupied\n").unwrap();
+
+    let before = fs::read_to_string(git_dir.join("config")).unwrap();
+    let packed_before = fs::read_to_string(git_dir.join("packed-refs")).unwrap();
+    let result = ops::remove_remote(&git_dir, "origin");
+    assert!(result.is_err());
+    assert_eq!(fs::read_to_string(git_dir.join("config")).unwrap(), before);
+    assert_eq!(
+        fs::read_to_string(git_dir.join("packed-refs")).unwrap(),
+        packed_before
+    );
+}
+
+#[test]
+fn remote_mutations_reject_malformed_repository_config() {
+    let t = repo();
+    let git_dir = t.path().join(".git");
+    let config_path = git_dir.join("config");
+    fs::write(&config_path, "this is not valid config\n").unwrap();
+    let before = fs::read_to_string(&config_path).unwrap();
+
+    assert!(ops::add_remote(&git_dir, "origin", "https://example.invalid/repo.git").is_err());
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), before);
+}
