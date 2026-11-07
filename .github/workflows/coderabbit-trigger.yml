@@ -1,0 +1,49 @@
+name: CodeRabbit review
+
+# Use the base branch workflow and never check out or execute pull request code.
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review
+        required: true
+        type: string
+
+# Comments use the dedicated personal token, never the Actions bot token.
+permissions: {}
+
+jobs:
+  trigger-review:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Request CodeRabbit review as the repository owner
+        env:
+          GH_TOKEN: ${{ secrets.CODERABBIT_TRIGGER_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Add the CODERABBIT_TRIGGER_TOKEN Actions secret with a personal token that has Pull requests: Read and write."
+            exit 1
+          fi
+          if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::A positive pull request number is required."
+            exit 1
+          fi
+          if [[ "$(gh api user --jq .login)" != "$REPOSITORY_OWNER" ]]; then
+            echo "::error::CODERABBIT_TRIGGER_TOKEN must belong to the repository owner."
+            exit 1
+          fi
+          pr_state="$(gh pr view "$PR_NUMBER" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"
+          if [[ "$pr_state" != $'OPEN\tfalse' ]]; then
+            echo "::notice::Skipping a closed or draft pull request."
+            exit 0
+          fi
+          gh pr comment "$PR_NUMBER" --body "@coderabbitai review"
